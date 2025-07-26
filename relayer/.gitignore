@@ -133,11 +133,4 @@ dist
 cache
 .idea
 
-buildingwith1inch.md
-codereview.md
-fusionplus.md
-requirements.md
-nearprotocol.md
-solver.md
-
 package-lock.json
