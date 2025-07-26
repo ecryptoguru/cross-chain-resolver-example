@@ -4,7 +4,14 @@
   "description": "Example of 1inch cross chain resolver",
   "scripts": {
     "test": "forge build && node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
-    "lint": "eslint  \"tests/**/*.ts\""
+    "lint": "eslint  \"tests/**/*.ts\"",
+    "test:watch": "jest --watch",
+    "compile": "hardhat compile",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet",
+    "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
+    "node": "hardhat node",
+    "fork": "hardhat node --fork $RPC_URL"
   },
   "devDependencies": {
     "@1inch/eslint-config": "^v3.0.7",
