@@ -1,9 +1,34 @@
-1. Prerequisites
+# 1inch Fusion+ x NEAR Cross-Chain Swap
 
-First, let's install the necessary system dependencies:
-# Install Node.js (v22+)
-nvm install 22
-nvm use 22
+This project implements a cross-chain swap solution between Ethereum and NEAR using 1inch Fusion+. It enables atomic swaps between the two blockchains while preserving hashlock and timelock functionality.
+
+## Project Structure
+
+```
+cross-chain-resolver-example/
+├── contracts/           # Ethereum smart contracts
+├── near-solver/         # NEAR-side solver (Rust)
+├── relayer/             # Cross-chain message relayer (TypeScript)
+├── docs/                # Documentation
+└── tests/               # Integration tests
+```
+
+## Features
+
+- **Cross-Chain Swaps**: Atomic swaps between Ethereum and NEAR
+- **1inch Fusion+ Integration**: Leverages 1inch's Fusion mode for order matching
+- **Shade Agent Framework**: Decentralized solver network on NEAR
+- **TEE Support**: Secure execution environment for the NEAR solver
+- **Modular Architecture**: Easy to extend and maintain
+
+## Prerequisites
+
+### System Dependencies
+
+```bash
+# Install Node.js (v18+)
+nvm install 18
+nvm use 18
 
 # Install pnpm
 npm install -g pnpm
@@ -19,147 +44,271 @@ source "$HOME/.cargo/env"
 # Install NEAR CLI
 npm install -g near-cli
 
-2. Project Setup
+# Install cargo-near
+cargo install cargo-near
+```
 
-# Clone the repository (if not already done)
+## Getting Started
+
+### 1. Clone the Repository
+
+```bash
 git clone https://github.com/1inch/cross-chain-resolver-example.git
 cd cross-chain-resolver-example
+```
 
+### 2. Install Dependencies
+
+```bash
 # Install Node.js dependencies
 pnpm install
 
 # Install Foundry dependencies
 forge install
+```
 
-# Install Rust dependencies (for NEAR development)
-cargo install cargo-near
+### 3. Configuration
 
-3. Environment Configuration
+Create a `.env` file in the project root with the following variables:
 
-Create a .env file in the project root with the following variables:
-
-.env
-# Ethereum RPC URLs (replace with your own or use public ones)
-SRC_CHAIN_RPC=https://eth.merkle.io
-DST_CHAIN_RPC=wss://bsc-rpc.publicnode.com
+```env
+# Ethereum Configuration
+ETHEREUM_RPC_URL=https://eth.merkle.io
+ETHEREUM_CHAIN_ID=1  # 1 for mainnet, 5 for Goerli, etc.
 
 # NEAR Configuration
 NEAR_NETWORK=testnet
+NEAR_NODE_URL=https://rpc.testnet.near.org
 NEAR_ACCOUNT_ID=your-account.testnet
-NEAR_KEY_PATH=~/.near-credentials/testnet/your-account.testnet.json
+NEAR_PRIVATE_KEY=ed25519:...
 
-# Optional: For local development
-ANVIL_FORK_URL=https://eth-mainnet.g.alchemy.com/v2/your-api-key
+# Relayer Configuration
+RELAYER_POLL_INTERVAL=5000  # 5 seconds
+LOG_LEVEL=info
+```
 
-4. NEAR Development Setup
+## NEAR Solver Setup
 
-# Create a testnet account (if you don't have one)
-near login
+The NEAR solver is implemented in Rust and runs in a Trusted Execution Environment (TEE).
 
-# Initialize NEAR project structure
-mkdir -p near-contracts
-cd near-contracts
-cargo near new escrow
-cd escrow
+### Build the Solver
 
-5. Development Tools
+```bash
+cd near-solver
+cargo build --target wasm32-unknown-unknown --release
+```
 
-For Ethereum Development:
-Hardhat: Already included in the project
-Foundry: For testing and deployment
-Ethers.js: For interacting with Ethereum
-For NEAR Development:
-NEAR CLI: For deployment and interaction
-cargo-near: For building and testing NEAR contracts
-near-cli-rs: For better CLI experience (optional)
+### Deploy to Testnet
 
-6. Testing the Setup
+1. Log in to your NEAR account:
+   ```bash
+   near login
+   ```
 
+2. Deploy the solver:
+   ```bash
+   ./deploy.sh your-account.testnet
+   ```
+
+## Relayer Setup
+
+The relayer handles cross-chain communication between Ethereum and NEAR.
+
+### Start the Relayer
+
+```bash
+cd relayer
+pnpm install
+pnpm build
+pnpm start
+```
+
+The relayer will start and begin monitoring for cross-chain events.
+
+## Development Tools
+
+### Ethereum Development
+- Hardhat: Smart contract development and testing
+- Foundry: Advanced testing and deployment
+- Ethers.js: Ethereum interaction library
+
+### NEAR Development
+- NEAR CLI: For deployment and interaction
+- cargo-near: For building and testing NEAR contracts
+- near-cli-rs: Enhanced CLI experience (optional)
+
+### Monitoring
+- Prometheus: Metrics collection
+- Grafana: Monitoring dashboards
+
+## Testing
+
+### Run Unit Tests
+
+```bash
 # Run Ethereum tests
+cd contracts
 pnpm test
 
-# Run NEAR tests (from near-contracts/escrow)
+# Run NEAR solver tests
+cd ../near-solver
 cargo test
 
-7. Development Workflow
+# Run relayer tests
+cd ../relayer
+pnpm test
+```
 
-Ethereum Development:
-Write and test Solidity contracts in contracts/
-Run tests with pnpm test
-Deploy to testnet using Hardhat or Foundry
+### Run Integration Tests
 
-NEAR Development:
-Write and test Rust contracts in near-contracts/
-Deploy to testnet:
-
-cd near-contracts/escrow
-cargo near deploy --account-id your-account.testnet
-Integration Testing:
-
-
-8. Local Development Networks
-For local development, you can use:
-
-# Start a local Ethereum node (Anvil)
+```bash
+# Start local Ethereum node (Anvil)
 anvil
 
-# In a new terminal, deploy contracts to local node
+# In a new terminal, deploy contracts
+cd contracts
 pnpm deploy:local
 
-# For NEAR local development
+# In another terminal, run integration tests
+pnpm test:integration
+```
+
+## Development Workflow
+
+### Ethereum Development
+1. Write and test Solidity contracts in `contracts/src/`
+2. Run tests: `pnpm test`
+3. Deploy to testnet: `pnpm deploy:testnet`
+
+### NEAR Development
+1. Write and test Rust contracts in `near-solver/src/`
+2. Run tests: `cargo test`
+3. Deploy to testnet: `./deploy.sh your-account.testnet`
+
+### Integration Testing
+1. Start local Ethereum node: `anvil`
+2. Deploy contracts: `pnpm deploy:local`
+3. Start relayer: `cd relayer && pnpm start`
+4. Run integration tests: `pnpm test:integration`
+
+## Local Development
+
+### Ethereum Local Node
+
+```bash
+# Start Anvil (local Ethereum node)
+anvil
+
+# Deploy contracts to local node
+cd contracts
+pnpm deploy:local
+```
+
+### NEAR Local Node
+
+```bash
+# Start NEAR local testnet
 nearup run testnet
 
-9. Useful Scripts
+# Set NEAR_ENV to local
+# export NEAR_ENV=local
+```
 
-Add these to your package.json scripts:
+## Available Scripts
 
-json
-{
-  "scripts": {
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "compile": "hardhat compile",
-    "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet",
-    "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
-    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
-    "node": "hardhat node",
-    "fork": "hardhat node --fork $RPC_URL"
-  }
-}
+### Contracts
+```bash
+# Compile contracts
+pnpm compile
 
-10. IDE Setup
-For better development experience:
+# Run tests
+pnpm test
 
-VS Code Extensions:
-Solidity (by Juan Blanco)
-Rust Analyzer
-Hardhat
-ESLint
-Prettier
+# Deploy to testnet
+pnpm deploy:testnet
 
-Recommended Settings:
-json
+# Start local node
+pnpm node
+```
+
+### NEAR Solver
+```bash
+# Build the contract
+cargo build --target wasm32-unknown-unknown --release
+
+# Run tests
+cargo test
+
+# Deploy to testnet
+./deploy.sh your-account.testnet
+```
+
+### Relayer
+```bash
+# Install dependencies
+pnpm install
+
+# Build
+pnpm build
+
+# Start
+pnpm start
+```
+
+## IDE Setup
+
+### VS Code Extensions
+- Solidity (by Juan Blanco)
+- Rust Analyzer
+- Hardhat
+- ESLint
+- Prettier
+- TOML Language Support
+- Docker
+
+### Recommended Settings
+
+```json
 {
   "solidity.packageDefaultDependenciesContractsDirectory": "contracts/src",
   "solidity.packageDefaultDependenciesDirectory": "contracts/lib",
   "rust-analyzer.check.command": "clippy",
-  "editor.formatOnSave": true
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": true
+  }
 }
+```
 
-11. Next Steps
+## Next Steps
 
-Verify the setup by running tests:
-pnpm test
+1. **Deploy to Testnet**
+   - Deploy contracts to Ethereum testnet
+   - Deploy NEAR solver to testnet
+   - Configure and start the relayer
 
-Start developing by:
-Adding new contracts to contracts/src/
-Writing tests in tests/
-Implementing the NEAR integration in near-contracts/
+2. **Testing**
+   - Run unit tests for all components
+   - Test cross-chain swaps on testnet
+   - Perform security audits
 
-For debugging:
-Use console.log in Solidity
-Use near-cli for NEAR contract interaction
-Use Hardhat's console.log for Ethereum debugging
+3. **Mainnet Deployment**
+   - Deploy audited contracts to mainnet
+   - Set up monitoring and alerting
+   - Deploy production relayer infrastructure
+
+## Security Considerations
+
+- Always audit smart contracts before deployment
+- Use multi-sig wallets for contract administration
+- Monitor for suspicious activity
+- Keep private keys secure
+- Regularly update dependencies
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Running
 

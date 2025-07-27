@@ -65,6 +65,82 @@ ETHEREUM_ESCROW_FACTORY_ADDRESS=
 NEAR_ESCROW_FACTORY_ADDRESS=
 ```
 
+## Monitoring and Metrics
+
+The relayer includes built-in monitoring capabilities using Prometheus and Grafana.
+
+### Available Metrics
+
+- **Ethereum Events Processed**: Counter for processed Ethereum events
+- **NEAR Events Processed**: Counter for processed NEAR events
+- **Active Connections**: Current number of active connections
+- **Ethereum Block Height**: Current Ethereum block height
+- **NEAR Block Height**: Current NEAR block height
+
+### Accessing Metrics
+
+1. Prometheus metrics are available at `http://localhost:3000/metrics`
+2. Health check endpoint at `http://localhost:3000/health`
+
+### Setting Up Monitoring Stack
+
+1. Start the monitoring stack using Docker Compose:
+   ```bash
+   docker-compose up -d prometheus grafana
+   ```
+
+2. Access the monitoring dashboards:
+   - Prometheus: http://localhost:9090
+   - Grafana: http://localhost:3001 (admin/admin)
+
+## Deployment
+
+### Prerequisites
+
+- Docker and Docker Compose
+- Node.js 18+ and pnpm/npm
+- Access to Ethereum and NEAR nodes
+
+### Environment Variables
+
+Create a `.env` file with the following variables:
+
+```env
+# Ethereum Configuration
+ETHEREUM_RPC_URL=
+ETHEREUM_PRIVATE_KEY=
+ETHEREUM_ESCROW_FACTORY_ADDRESS=
+
+# NEAR Configuration
+NEAR_NETWORK=testnet
+NEAR_NODE_URL=
+NEAR_ACCOUNT_ID=
+NEAR_PRIVATE_KEY=
+NEAR_ESCROW_FACTORY_ADDRESS=
+
+# Relayer Configuration
+LOG_LEVEL=info
+POLLING_INTERVAL=5000
+```
+
+### Building the Docker Image
+
+```bash
+docker build -t cross-chain-relayer .
+```
+
+### Running with Docker Compose
+
+1. Update the environment variables in `docker-compose.yml`
+2. Start the service:
+   ```bash
+   docker-compose up -d relayer
+   ```
+
+### Kubernetes Deployment
+
+For production deployments, you can use the provided Kubernetes manifests in the `k8s/` directory.
+
 ## Running the Relayer
 
 ### Development Mode
