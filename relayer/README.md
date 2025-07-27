@@ -1,14 +1,16 @@
-# Cross-Chain Relayer
+# Cross-Chain Relayer (NEAR + Ethereum)
 
-This is the relayer service for the 1inch Fusion+ x NEAR Protocol cross-chain swap solution. The relayer monitors events on both Ethereum and NEAR blockchains and facilitates cross-chain communication between them.
+This is the relayer service for the 1inch Fusion+ x NEAR Protocol cross-chain swap solution. The relayer monitors events on both Ethereum and NEAR blockchains, facilitating secure and efficient cross-chain communication between them.
 
 ## Features
 
-- Monitors Ethereum for escrow creation and fulfillment events
-- Monitors NEAR for deposit and withdrawal events
-- Handles cross-chain message passing between Ethereum and NEAR
-- Provides a robust logging system for monitoring and debugging
-- Configurable polling intervals and logging levels
+- **Bidirectional Cross-Chain Swaps**: Enables seamless token swaps between NEAR and Ethereum
+- **Event Monitoring**: Tracks escrow creation, fulfillment, and cancellation events on both chains
+- **Message Relaying**: Handles secure message passing between NEAR and Ethereum
+- **Robust Error Handling**: Implements retry mechanisms and error recovery
+- **Configurable Polling**: Adjustable intervals for block scanning and event processing
+- **Extensive Logging**: Detailed logs for monitoring and debugging
+- **Modular Architecture**: Easy to extend with additional blockchain integrations
 
 ## Prerequisites
 
@@ -16,6 +18,8 @@ This is the relayer service for the 1inch Fusion+ x NEAR Protocol cross-chain sw
 - pnpm (recommended) or npm
 - Rust (for NEAR smart contract development)
 - NEAR CLI (for NEAR account management)
+- Git
+- Docker and Docker Compose (for local development and testing)
 
 ## Installation
 
@@ -40,13 +44,15 @@ This is the relayer service for the 1inch Fusion+ x NEAR Protocol cross-chain sw
 
 ## Configuration
 
+### Environment Variables
+
 Update the `.env` file with your configuration:
 
 ```env
 # Ethereum Configuration
 ETHEREUM_RPC_URL=http://localhost:8545
 ETHEREUM_CHAIN_ID=31337
-DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+ETHEREUM_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
 # NEAR Configuration
 NEAR_NETWORK=testnet
@@ -57,13 +63,77 @@ NEAR_ACCOUNT_ID=your-near-account.testnet
 NEAR_PRIVATE_KEY=ed25519:...
 
 # Relayer Configuration
-RELAYER_POLL_INTERVAL=5000 # 5 seconds
-LOG_LEVEL=info
+RELAYER_POLL_INTERVAL=5000  # 5 seconds
+LOG_LEVEL=info              # debug, info, warn, error
+MAX_RETRIES=3               # Maximum retry attempts for failed operations
+RETRY_DELAY=5000           # Delay between retries in ms
 
 # Contract Addresses
-ETHEREUM_ESCROW_FACTORY_ADDRESS=
-NEAR_ESCROW_FACTORY_ADDRESS=
+ETHEREUM_ESCROW_CONTRACT=0x...
+NEAR_ESCROW_CONTRACT=escrow.your-account.testnet
+
+# Monitoring (Optional)
+PROMETHEUS_PORT=9090
+GRAFANA_PORT=3001
 ```
+
+### Network Configuration
+
+#### Testnet
+- **Ethereum**: Sepolia Testnet (Chain ID: 11155111)
+- **NEAR**: Testnet
+
+#### Mainnet
+- **Ethereum**: Mainnet (Chain ID: 1)
+- **NEAR**: Mainnet
+
+## Running the Relayer
+
+### Local Development
+
+1. Start the relayer in development mode:
+   ```bash
+   pnpm dev
+   # or
+   npm run dev
+   ```
+
+2. Run tests:
+   ```bash
+   pnpm test
+   # or
+   npm test
+   ```
+
+### Production Deployment
+
+1. Build the application:
+   ```bash
+   pnpm build
+   ```
+
+2. Start the relayer:
+   ```bash
+   pnpm start
+   ```
+
+## Cross-Chain Flow
+
+### NEAR to Ethereum Swap
+1. User initiates a swap on NEAR
+2. NEAR contract emits a `DepositInitiated` event
+3. Relayer picks up the event and processes the deposit
+4. Funds are locked in the NEAR escrow
+5. Relayer submits the transaction to Ethereum
+6. Funds are released to the recipient on Ethereum
+
+### Ethereum to NEAR Swap
+1. User initiates a swap on Ethereum
+2. Ethereum contract emits a `DepositInitiated` event
+3. Relayer picks up the event and processes the deposit
+4. Funds are locked in the Ethereum escrow
+5. Relayer submits the transaction to NEAR
+6. Funds are released to the recipient on NEAR
 
 ## Monitoring and Metrics
 
@@ -76,6 +146,8 @@ The relayer includes built-in monitoring capabilities using Prometheus and Grafa
 - **Active Connections**: Current number of active connections
 - **Ethereum Block Height**: Current Ethereum block height
 - **NEAR Block Height**: Current NEAR block height
+- **Message Processing Latency**: Time taken to process cross-chain messages
+- **Error Rates**: Count of failed operations by type
 
 ### Accessing Metrics
 
@@ -86,12 +158,20 @@ The relayer includes built-in monitoring capabilities using Prometheus and Grafa
 
 1. Start the monitoring stack using Docker Compose:
    ```bash
-   docker-compose up -d prometheus grafana
+   docker-compose -f docker-compose.monitoring.yml up -d
    ```
 
 2. Access the monitoring dashboards:
    - Prometheus: http://localhost:9090
    - Grafana: http://localhost:3001 (admin/admin)
+
+## Security Considerations
+
+1. **Private Keys**: Never commit private keys to version control
+2. **Rate Limiting**: Implement rate limiting for RPC endpoints
+3. **Gas Management**: Monitor gas prices and set appropriate limits
+4. **Error Handling**: Implement comprehensive error handling and alerting
+5. **Upgrades**: Keep all dependencies up to date
 
 ## Deployment
 

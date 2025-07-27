@@ -3,6 +3,7 @@
 pragma solidity 0.8.23;
 
 import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
+import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 import {IOrderMixin} from "limit-order-protocol/contracts/interfaces/IOrderMixin.sol";
 import {TakerTraits} from "limit-order-protocol/contracts/libraries/TakerTraitsLib.sol";
@@ -16,15 +17,56 @@ import {Address} from "solidity-utils/contracts/libraries/AddressLib.sol";
 import {IEscrow} from "../lib/cross-chain-swap/contracts/interfaces/IEscrow.sol";
 import {ImmutablesLib} from "../lib/cross-chain-swap/contracts/libraries/ImmutablesLib.sol";
 
+// NEAR-specific interfaces
+interface INearBridge {
+    function deposit() external payable;
+    function withdraw(bytes calldata proofData, bytes calldata blockHeaderLite, bytes calldata blockProof) external;
+}
+
+interface INearToken {
+    function ft_transfer_call(
+        string memory receiver_id,
+        uint128 amount,
+        string memory memo,
+        bytes memory msg
+    ) external returns (bool);
+}
+
 /**
- * @title Sample implementation of a Resolver contract for cross-chain swap.
- * @dev It is important when deploying an escrow on the source chain to send the safety deposit and deploy the escrow in the same
- * transaction, since the address of the escrow depends on the block.timestamp.
- * You can find sample code for this in the {ResolverExample-deploySrc}.
+ * @title Cross-chain Resolver for 1inch Fusion+ and NEAR Protocol
+ * @dev This contract handles cross-chain swaps between Ethereum and NEAR Protocol.
+ * It extends the base Resolver functionality to support NEAR-specific operations.
  *
  * @custom:security-contact security@1inch.io
  */
 contract Resolver is Ownable {
+    // Events for NEAR integration
+    event NearDepositInitiated(
+        address indexed sender,
+        string nearRecipient,
+        uint256 amount,
+        bytes32 secretHash,
+        uint256 timelock
+    );
+    
+    event NearWithdrawalCompleted(
+        bytes32 indexed secretHash,
+        string nearRecipient,
+        uint256 amount
+    );
+    
+    event NearRefunded(
+        bytes32 indexed secretHash,
+        string nearRecipient,
+        uint256 amount
+    );
+    
+    // Constants for NEAR integration
+    address public constant NEAR_BRIDGE = 0x3FEFc5A022Bf1f57d3D1fDd5cc20c42e467E4bEe; // Example address, update with actual
+    string public constant NEAR_TOKEN_CONTRACT = "wrap.near"; // NEAR token contract on NEAR
+    
+    // Mapping to track NEAR deposits
+    mapping(bytes32 => bool) public nearDeposits;
     using ImmutablesLib for IBaseEscrow.Immutables;
     using TimelocksLib for Timelocks;
 
@@ -74,13 +116,49 @@ contract Resolver is Ownable {
         _FACTORY.createDstEscrow{value: msg.value}(dstImmutables, srcCancellationTimestamp);
     }
 
+    /**
+     * @notice Withdraw funds from escrow using the secret
+     * @param escrow The escrow contract address
+     * @param secret The secret to unlock the funds
+     * @param immutables Immutable parameters for the escrow
+     */
     function withdraw(IEscrow escrow, bytes32 secret, IBaseEscrow.Immutables calldata immutables) external {
         escrow.withdraw(secret, immutables);
+        
+        // If this is a NEAR-related withdrawal, emit an event
+        if (nearDeposits[keccak256(abi.encodePacked(immutables.dstChainId, immutables.recipient))]) {
+            emit NearWithdrawalCompleted(
+                keccak256(abi.encodePacked(secret)),
+                string(abi.encodePacked(immutables.recipient)),
+                immutables.amount
+            );
+            
+            // Clean up
+            delete nearDeposits[keccak256(abi.encodePacked(immutables.dstChainId, immutables.recipient))];
+        }
     }
 
 
+    /**
+     * @notice Cancel an escrow and handle NEAR-specific cleanup if needed
+     * @param escrow The escrow contract address
+     * @param immutables Immutable parameters for the escrow
+     */
     function cancel(IEscrow escrow, IBaseEscrow.Immutables calldata immutables) external {
         escrow.cancel(immutables);
+        
+        // If this is a NEAR-related escrow, emit refund event
+        bytes32 depositKey = keccak256(abi.encodePacked(immutables.dstChainId, immutables.recipient));
+        if (nearDeposits[depositKey]) {
+            emit NearRefunded(
+                depositKey,
+                string(abi.encodePacked(immutables.recipient)),
+                immutables.amount
+            );
+            
+            // Clean up
+            delete nearDeposits[depositKey];
+        }
     }
 
     /**

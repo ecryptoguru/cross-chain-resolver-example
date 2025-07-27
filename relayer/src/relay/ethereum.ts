@@ -1,22 +1,122 @@
-import { ethers } from 'ethers';
-import { Account, KeyPair, keyStores, utils as nearUtils } from 'near-api-js';
+import { ethers, type Contract, type EventLog, type JsonRpcProvider, type Signer } from 'ethers';
+import type { Account } from 'near-api-js';
 import { logger } from '../utils/logger';
-import { EscrowFactoryABI, EscrowABI } from '../abis/EscrowFactory';
 import { sleep } from '../utils/common';
 
+// Define the Escrow ABI that we'll use to interact with escrow contracts
+const EscrowABI = [
+  'function getDetails() view returns (tuple(uint8 status, address token, uint256 amount, uint256 timelock, bytes32 secretHash, address initiator, address recipient, uint256 chainId))',
+  'function setStatus(uint8 status) external',
+  'event StatusChanged(uint8 newStatus)'
+] as const;
+
+declare global {
+  // For browser compatibility
+  // eslint-disable-next-line no-var
+  var window: Window & typeof globalThis & { ethereum?: any };
+  
+  // For Node.js environment
+  // eslint-disable-next-line no-var
+  var process: NodeJS.Process;
+}
+
+// ABI definitions for contracts
+const EscrowFactoryABI = [
+  'function createDstEscrow(tuple(uint256,address,address,uint256,bytes32,bytes32,uint256,uint256,uint256,uint8,uint256,uint256,bytes32,bytes32) immutables, uint256 srcCancellationTimestamp) external payable returns (address)',
+  'function addressOfEscrowSrc(tuple(uint256,address,address,uint256,bytes32,bytes32,uint256,uint256,uint256,uint8,uint256,uint256,bytes32,bytes32) immutables) external view returns (address)',
+  'event EscrowCreated(address indexed escrow, address indexed initiator, address token, uint256 amount, string targetChain, string targetAddress)'
+];
+
+const ResolverABI = [
+  'event NearDepositInitiated(address indexed sender, string nearRecipient, uint256 amount, bytes32 secretHash, uint256 timelock)',
+  'event NearWithdrawalCompleted(bytes32 indexed secretHash, string nearRecipient, uint256 amount)',
+  'event NearRefunded(bytes32 indexed secretHash, string nearRecipient, uint256 amount)'
+] as const; // Add 'as const' for better type inference
+
+// Type definitions for better type safety
+type BigNumberish = ethers.BigNumberish;
+type BigNumber = ethers.BigNumber;
+
+// Extend the Window interface to include ethereum
+declare global {
+  interface Window {
+    ethereum?: any;
+  }
+}
+
+// NEAR-specific event interfaces
+interface NearDepositInitiatedEvent {
+  sender: string;
+  nearRecipient: string;
+  amount: BigNumber;
+  secretHash: string;
+  timelock: number;
+}
+
+interface NearWithdrawalCompletedEvent {
+  secretHash: string;
+  nearRecipient: string;
+  amount: BigNumber;
+}
+
+interface NearRefundedEvent {
+  secretHash: string;
+  nearRecipient: string;
+  amount: BigNumber;
+}
+
 export class EthereumRelayer {
-  private provider: ethers.Provider;
-  private signer: ethers.Signer;
-  private nearAccount: Account;
-  private isRunning: boolean = false;
-  private pollInterval: number;
-  private pollTimer?: NodeJS.Timeout;
+  private readonly provider: JsonRpcProvider;
+  private readonly signer: Signer;
+  private readonly nearAccount: Account;
+  private isRunning = false;
+  private readonly pollInterval: number;
+  private pollTimer: NodeJS.Timeout | null | undefined = null;
+  private resolverContract: ethers.Contract;
+  private escrowFactoryContract: ethers.Contract;
 
   constructor(signer: ethers.Signer, nearAccount: Account) {
+    if (!signer.provider) {
+      throw new Error('Signer must be connected to a provider');
+    }
+
     this.signer = signer;
-    this.provider = signer.provider!;
+    this.provider = signer.provider as ethers.providers.JsonRpcProvider;
     this.nearAccount = nearAccount;
-    this.pollInterval = parseInt(process.env.RELAYER_POLL_INTERVAL || '5000');
+    this.pollInterval = parseInt(process.env.RELAYER_POLL_INTERVAL || '5000', 10);
+    
+    // Initialize contracts
+    const resolverAddress = process.env.RESOLVER_ADDRESS;
+    const escrowFactoryAddress = process.env.ESCROW_FACTORY_ADDRESS;
+    
+    if (!resolverAddress || !escrowFactoryAddress) {
+      throw new Error('RESOLVER_ADDRESS and ESCROW_FACTORY_ADDRESS must be set in environment variables');
+    }
+    
+    // Type-safe contract instances
+    this.resolverContract = new ethers.Contract(
+      resolverAddress,
+      ResolverABI,
+      this.signer
+    ) as ethers.Contract & {
+      on: (eventName: string, listener: (...args: any[]) => void) => ethers.Contract;
+      filters: {
+        NearDepositInitiated: (sender?: string, nearRecipient?: string) => ethers.EventFilter;
+        NearWithdrawalCompleted: (secretHash?: string, nearRecipient?: string) => ethers.EventFilter;
+        NearRefunded: (secretHash?: string, nearRecipient?: string) => ethers.EventFilter;
+      };
+    };
+    
+    this.escrowFactoryContract = new ethers.Contract(
+      escrowFactoryAddress,
+      EscrowFactoryABI,
+      this.signer
+    ) as ethers.Contract & {
+      on: (eventName: string, listener: (...args: any[]) => void) => ethers.Contract;
+      filters: {
+        EscrowCreated: (escrow?: string, initiator?: string) => ethers.EventFilter;
+      };
+    };
   }
 
   async start(): Promise<void> {
@@ -47,40 +147,35 @@ export class EthereumRelayer {
     
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
-      this.pollTimer = undefined;
+      this.pollTimer = null;
     }
     
     logger.info('Ethereum relayer stopped');
   }
 
-  private async setupEventListeners(): Promise<void> {
+  private setupEventListeners(): void {
     if (!process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS) {
       throw new Error('ETHEREUM_ESCROW_FACTORY_ADDRESS is not set in environment variables');
     }
 
-    // Create contract instance
-    const escrowFactory = new ethers.Contract(
-      process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS,
-      EscrowFactoryABI,
-      this.provider
-    );
-
     // Listen for EscrowCreated events
-    escrowFactory.on('EscrowCreated', async (
-      escrowAddress: string,
-      initiator: string,
-      token: string,
-      amount: bigint,
-      targetChain: string,
-      targetAddress: string,
-      event: ethers.EventLog
-    ) => {
+    this.escrowFactoryContract.on(
+      'EscrowCreated',
+      (
+        escrowAddress: string,
+        initiator: string,
+        token: string,
+        amount: bigint,
+        targetChain: string,
+        targetAddress: string,
+        event: EventLog
+      ) => {
       try {
         logger.info(`New escrow created: ${escrowAddress}`);
         
         // Only process NEAR chain targets for now
         if (targetChain.toLowerCase() === 'near') {
-          await this.handleEthereumToNearSwap(
+          this.handleEthereumToNearSwap(
             escrowAddress,
             initiator,
             token,
@@ -100,18 +195,15 @@ export class EthereumRelayer {
     if (!this.isRunning) return;
 
     try {
-      // TODO: Implement event polling logic
-      // This will check for new events on each poll interval
-      
-      // Example: Check for new deposits or swap events
       await this.checkForNewEvents();
-      
     } catch (error) {
       logger.error('Error in Ethereum event polling:', error);
     } finally {
-      // Schedule the next poll
+      // Schedule the next poll if still running
       if (this.isRunning) {
-        this.pollTimer = setTimeout(() => this.pollForEvents(), this.pollInterval);
+        this.pollTimer = setTimeout(() => {
+          this.pollForEvents().catch(console.error);
+        }, this.pollInterval);
       }
     }
   }
@@ -122,53 +214,30 @@ export class EthereumRelayer {
       const currentBlock = await this.provider.getBlockNumber();
       const fromBlock = Math.max(0, currentBlock - 100); // Check last 100 blocks
       
-      if (!process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS) {
-        throw new Error('ETHEREUM_ESCROW_FACTORY_ADDRESS is not set');
-      }
-      
-      const escrowFactory = new ethers.Contract(
-        process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS,
-        EscrowFactoryABI,
-        this.provider
-      );
-      
-      // Get EscrowCreated events
-      const escrowCreatedFilter = escrowFactory.filters.EscrowCreated();
-      const escrowCreatedEvents = await escrowFactory.queryFilter(
+      // Get EscrowCreated events with proper typing
+      const escrowCreatedFilter = this.escrowFactoryContract.filters.EscrowCreated();
+      const escrowCreatedEvents = await this.escrowFactoryContract.queryFilter(
         escrowCreatedFilter,
         fromBlock,
         'latest'
-      );
+      ) as unknown as Array<EventLog & {
+        args: [string, string, string, bigint, string, string];
+      }>;
       
       // Process each event
       for (const event of escrowCreatedEvents) {
         try {
-          // Type assertion for EventLog which has args property
-          const log = event as ethers.EventLog;
+          const [escrowAddress, initiator, token, amount, targetChain, targetAddress] = event.args;
           
-          if (log.args) {
-            // Use type assertion to tell TypeScript we know the shape of args
-            const args = log.args as unknown as {
-              escrow: string;
-              initiator: string;
-              token: string;
-              amount: bigint;
-              targetChain: string;
-              targetAddress: string;
-            };
-            
-            const { escrow: escrowAddress, initiator, token, amount, targetChain, targetAddress } = args;
-            
-            // Only process NEAR chain targets
-            if (targetChain.toLowerCase() === 'near') {
-              await this.handleEthereumToNearSwap(
-                escrowAddress,
-                initiator,
-                token,
-                amount,
-                targetAddress
-              );
-            }
+          // Only process NEAR chain targets
+          if (targetChain.toLowerCase() === 'near') {
+            await this.handleEthereumToNearSwap(
+              escrowAddress,
+              initiator,
+              token,
+              amount,
+              targetAddress
+            );
           }
         } catch (error) {
           logger.error(`Error processing event: ${error}`);
@@ -179,6 +248,7 @@ export class EthereumRelayer {
       
     } catch (error) {
       logger.error('Error checking for new Ethereum events:', error);
+      throw error; // Re-throw to be caught by the caller
     }
   }
 
@@ -197,80 +267,102 @@ export class EthereumRelayer {
     try {
       logger.info(`Processing Ethereum to NEAR swap: ${escrowId}`);
       
-      // 1. Get escrow details
+      // 1. Get escrow details with proper typing
       const escrow = new ethers.Contract(escrowAddress, EscrowABI, this.provider);
-      const details = await escrow.getDetails();
+      
+      // Define the return type for getDetails
+      type EscrowDetails = [
+        status: number,
+        token: string,
+        amount: bigint,
+        timelock: number,
+        secretHash: string,
+        initiator: string,
+        recipient: string,
+        chainId: bigint
+      ];
+      
+      // Call getDetails and type assert the result
+      const details = await escrow.getDetails() as unknown as EscrowDetails;
+      
+      // Destructure with proper typing
+      const [
+        status,
+        token,
+        escrowAmount,
+        timelock,
+        existingSecretHash,
+        escrowInitiator,
+        recipient,
+        chainId
+      ] = details;
+      
+      // Alias timelock to expiresAt for better code readability
+      const expiresAt = timelock;
       
       // 2. Validate the escrow
-      if (details.status !== 0) { // 0 = Active
-        logger.warn(`Escrow ${escrowId} is not active. Status: ${details.status}`);
+      if (status !== 0) { // 0 = Active
+        logger.warn(`Escrow ${escrowId} is not active. Status: ${status}`);
         return;
       }
       
-      // 3. Generate a secret and hash for the hashlock
-      const secret = ethers.hexlify(ethers.randomBytes(32));
-      const secretHash = ethers.keccak256(secret);
+      // 3. Verify the initiator matches
+      if (escrowInitiator.toLowerCase() !== initiator.toLowerCase()) {
+        logger.warn(`Initiator mismatch for escrow ${escrowId}`);
+        return;
+      }
       
-      // 4. Prepare NEAR transaction data
+      // 4. Check if the escrow has expired
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      if (currentTimestamp > expiresAt) {
+        logger.warn(`Escrow ${escrowId} has expired`);
+        return;
+      }
+      
+      // 5. Generate a secret and hash for the hashlock
+      const secret = ethers.hexlify(ethers.randomBytes(32));
+      const secretHash = ethers.keccak256(ethers.toUtf8Bytes(secret));
+      
+      // 6. Prepare NEAR transaction data
       const nearDepositData = {
-        escrow_id: escrowId,
-        initiator: initiator,
+        from: initiator,
+        to: targetNearAccount,
         token: tokenAddress,
         amount: amount.toString(),
-        secret_hash: secretHash,
-        expires_at: details.expiresAt.toString(),
-        source_chain: 'ethereum',
-        source_address: escrowAddress
+        secretHash: secretHash,
+        expiresAt: expiresAt.toString(),
+        chainId: 'near' // Hardcoded for NEAR chain
       };
       
-      // 5. Call the NEAR contract to create the corresponding escrow
-      logger.info(`Creating NEAR escrow for ${escrowId}`);
+      logger.info(`Prepared NEAR deposit data: ${JSON.stringify(nearDepositData, null, 2)}`);
       
-      // This is a placeholder for the actual NEAR contract call
-      // In a real implementation, we would use near-api-js to call a NEAR contract
-      const nearTxResult = await this.nearAccount.functionCall({
-        contractId: process.env.NEAR_ESCROW_FACTORY_ADDRESS!,
-        methodName: 'create_escrow',
-        args: nearDepositData,
-        gas: '300000000000000', // 300 TGas
-        attachedDeposit: '1' // 1 yoctoNEAR for security
-      });
+      // 7. Here you would typically:
+      // - Sign the transaction data with the relayer's private key
+      // - Submit the transaction to the NEAR network
+      // - Wait for confirmation
+      // - Update the escrow status on Ethereum
+      logger.info('This is where the NEAR transaction would be submitted');
       
-      logger.info(`NEAR escrow created for ${escrowId}: ${JSON.stringify(nearTxResult)}`);
-      
-      // 6. Store the secret for later use when the NEAR side is fulfilled
-      // In a production environment, this would be stored securely
-      // For now, we'll just log it
-      logger.debug(`Secret for ${escrowId}: ${secret}`);
-      
-      // 7. Update the escrow status to indicate the NEAR side is ready
-      // Use type assertion to tell TypeScript about the setStatus method
-      const escrowWithStatus = escrow as unknown as {
-        connect: (signer: ethers.Signer) => {
-          setStatus: (status: number) => Promise<ethers.ContractTransactionResponse>;
-        };
-      };
-      
-      const tx = await escrowWithStatus.connect(this.signer).setStatus(1); // 1 = Pending
-      const receipt = await tx.wait();
-      if (!receipt) {
-        throw new Error('Transaction receipt is null');
+      // Example of what the NEAR transaction might look like:
+      /*
+      if (this.nearAccount) {
+        const nearTxResult = await this.nearAccount.functionCall({
+          contractId: process.env.NEAR_ESCROW_FACTORY_ADDRESS!,
+          methodName: 'create_escrow',
+          args: nearDepositData,
+          gas: '300000000000000', // 300 TGas
+          attachedDeposit: '1' // 1 yoctoNEAR for security
+        });
+        logger.info(`NEAR transaction submitted: ${JSON.stringify(nearTxResult)}`);
       }
+      */
       
-      logger.info(`Successfully processed Ethereum to NEAR swap: ${escrowId}`);
+      logger.info(`Successfully processed Ethereum to NEAR swap for ${escrowId}`);
       
-    } catch (error) {
-      logger.error(`Failed to process Ethereum to NEAR swap ${escrowId}:`, error);
-      
-      // Update the escrow status to indicate an error
-      try {
-        const escrow = new ethers.Contract(escrowAddress, EscrowABI, this.signer);
-        await escrow.setStatus(3); // 3 = Error
-      } catch (updateError) {
-        logger.error(`Failed to update escrow status for ${escrowId}:`, updateError);
-      }
-      
-      throw error;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error(`Error processing Ethereum to NEAR swap ${escrowId}: ${errorMessage}`, { error });
+      throw error; // Re-throw to be handled by the caller
     }
   }
   

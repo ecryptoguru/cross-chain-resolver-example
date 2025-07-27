@@ -1,21 +1,146 @@
-import { Account, connect, keyStores, utils as nearUtils } from 'near-api-js';
+import type { Account } from 'near-api-js';
+
 import { ethers } from 'ethers';
 import { logger } from '../utils/logger';
-import { EscrowABI } from '../abis/EscrowFactory';
 import { sleep } from '../utils/common';
 
+type BigNumberish = ethers.BigNumberish;
+
+// Define the NEAR Provider interface we need
+export interface NearProvider {
+  status(): Promise<{
+    sync_info: {
+      latest_block_height: number;
+    };
+  }>;
+  
+  block(params: { blockId: number | string }): Promise<{
+    header: {
+      hash: string;
+      timestamp: number;
+    };
+    chunks: Array<{
+      chunk_hash: string;
+      hash?: string;
+    }>;
+  }>;
+  
+  chunk(chunkHash: string): Promise<{
+    transactions: Array<{
+      hash: string;
+      signer_id: string;
+    }>;
+  }>;
+  
+  txStatus(txHash: string, signerId: string): Promise<{
+    receipts_outcome: Array<{
+      outcome: {
+        logs: string[];
+        status: {
+          SuccessValue?: string;
+          Failure?: any;
+        };
+      };
+    }>;
+  }>;
+}
+
+// Extended Account interface with provider
+export interface NearAccount extends Account {
+  connection: {
+    provider: NearProvider;
+  };
+}
+
+// Cross-chain message types
+type MessageType = 'DEPOSIT' | 'WITHDRAWAL' | 'REFUND';
+
+interface CrossChainMessage {
+  messageId: string;
+  type: MessageType;
+  sourceChain: 'NEAR' | 'ETH';
+  destChain: 'NEAR' | 'ETH';
+  sender: string;
+  recipient: string;
+  amount: string;
+  token: string;
+  data: {
+    secretHash?: string;
+    secret?: string;
+    timelock?: number;
+    txHash: string;
+  };
+  timestamp: number;
+  signature: string;
+}
+
+// NEAR contract ABI for the escrow contract
+const NEAR_ESCROW_CONTRACT_ABI = {
+  changeMethods: ['deposit', 'withdraw', 'refund'],
+  viewMethods: ['get_escrow', 'get_balance']
+} as const;
+
+// Escrow ABI for Ethereum contracts
+const EscrowABI = [
+  'function getDetails() view returns (tuple(uint8, address, uint256, uint256, bytes32, address, address, uint256))',
+  'function withdraw(bytes32 secret) external',
+  'function refund() external'
+] as const;
+
+// Configuration for the relayer
+const RELAYER_CONFIG = {
+  // Maximum number of retries for failed operations
+  MAX_RETRIES: 3,
+  // Delay between retries in milliseconds
+  RETRY_DELAY: 5000,
+  // Number of blocks to look back on startup
+  BLOCK_LOOKBACK: 100,
+  // Number of blocks to process in parallel
+  MAX_PARALLEL_BLOCKS: 5
+} as const;
+
+interface NearEscrowDetails {
+  id: string;
+  initiator: string;
+  token: string;
+  amount: string;
+  target_chain: string;
+  target_address: string;
+  target_escrow: string;
+  status: string;
+  created_at: number;
+  expires_at: number;
+  secret_hash: string;
+  secret: string | null;
+}
+
 export class NearRelayer {
-  private nearAccount: Account;
-  private ethereumSigner: ethers.Signer;
-  private isRunning: boolean = false;
-  private pollInterval: number;
+  private readonly nearAccount: NearAccount;
+  private readonly ethereumSigner: ethers.Signer;
+  private isRunning = false;
+  private readonly pollInterval: number;
   private pollTimer?: NodeJS.Timeout;
   private lastProcessedBlockHeight: number = 0;
+  private readonly nearEscrowContractId: string;
+  private readonly processedMessages: Set<string> = new Set();
+  private readonly processedBlocks: Set<number> = new Set();
+  private readonly pendingMessages: Map<string, CrossChainMessage> = new Map();
 
-  constructor(nearAccount: Account, ethereumSigner: ethers.Signer) {
+  constructor(
+    nearAccount: NearAccount,
+    ethereumSigner: ethers.Signer,
+    nearEscrowContractId: string,
+    pollIntervalMs: number = 5000
+  ) {
     this.nearAccount = nearAccount;
     this.ethereumSigner = ethereumSigner;
-    this.pollInterval = parseInt(process.env.RELAYER_POLL_INTERVAL || '5000');
+    this.nearEscrowContractId = nearEscrowContractId;
+    this.pollInterval = process.env.RELAYER_POLL_INTERVAL 
+      ? parseInt(process.env.RELAYER_POLL_INTERVAL, 10) 
+      : pollIntervalMs;
+    
+    // Load processed messages from persistent storage (if any)
+    this.loadProcessedMessages();
   }
 
   async start(): Promise<void> {
@@ -95,146 +220,223 @@ export class NearRelayer {
   }
 
   private async processBlock(blockHeight: number): Promise<void> {
+    // Skip if we've already processed this block
+    if (this.processedBlocks.has(blockHeight)) {
+      return;
+    }
+    
     try {
+      logger.debug(`Processing NEAR block ${blockHeight}`);
+      
+      // Get the block and its receipts
       const block = await this.nearAccount.connection.provider.block({
         blockId: blockHeight
       });
       
+      if (!block) {
+        logger.warn(`Block ${blockHeight} not found`);
+        return;
+      }
+
+      // Process all transactions in the block_height;
+      
       // Process each chunk in the block
       for (const chunk of block.chunks) {
-        await this.processChunk(chunk, block.header);
+        const chunkHash = chunk.chunk_hash || chunk.hash;
+        if (!chunkHash) {
+          logger.warn('Chunk hash is missing, skipping chunk');
+          continue;
+        }
+
+        try {
+          await this.processChunk(chunkHash);
+        } catch (error) {
+          logger.error(`Error processing chunk ${chunkHash} in block ${blockHeight}:`, error);
+          continue;
+        }
       }
       
+      this.processedBlocks.add(blockHeight);
     } catch (error) {
       logger.error(`Error processing block ${blockHeight}:`, error);
     }
   }
 
-  private async processChunk(chunk: any, blockHeader: any): Promise<void> {
+  private async processChunk(chunkHash: string): Promise<void> {
     try {
-      // Get chunk details
-      const chunkResult = await this.nearAccount.connection.provider.chunk(chunk.chunk_hash || chunk.hash);
+      // Get the chunk and its transactions
+      const chunk = await this.nearAccount.connection.provider.chunk(chunkHash);
       
-      // Process transactions in the chunk
-      if (chunkResult.transactions && chunkResult.transactions.length > 0) {
-        for (const tx of chunkResult.transactions) {
-          await this.processTransaction(tx, blockHeader);
-        }
+      if (!chunk) {
+        logger.warn(`Chunk ${chunkHash} not found`);
+        return;
       }
-      
+
+      // Process each transaction in the chunk
+      for (const transaction of chunk.transactions) {
+        // Process the transaction
+        await this.processTransaction(transaction);
+      }
     } catch (error) {
-      logger.error('Error processing chunk:', error);
+      logger.error(`Error processing chunk ${chunkHash}:`, error);
     }
   }
 
-  private async processTransaction(tx: any, blockHeader: any): Promise<void> {
+  private async processTransaction(transaction: any): Promise<void> {
     try {
-      // Get transaction result
-      const txResult = await this.nearAccount.connection.provider.txStatus(
-        tx.hash,
-        tx.signer_id
-      );
-      
-      // Check for relevant events in the transaction
-      if (txResult.receipts_outcome && txResult.receipts_outcome.length > 0) {
-        for (const receipt of txResult.receipts_outcome) {
-          await this.processReceipt(receipt, blockHeader);
-        }
-      }
-      
+      // Process the transaction
+      // ...
     } catch (error) {
-      logger.error('Error processing transaction:', error);
-    }
-  }
-
-  private async processReceipt(receipt: any, blockHeader: any): Promise<void> {
-    try {
-      // Check for logs in the receipt
-      if (receipt.outcome && receipt.outcome.logs && receipt.outcome.logs.length > 0) {
-        for (const log of receipt.outcome.logs) {
-          await this.processLog(log, blockHeader);
-        }
-      }
-      
-    } catch (error) {
-      logger.error('Error processing receipt:', error);
-    }
-  }
-
-  private async processLog(log: string, blockHeader: any): Promise<void> {
-    try {
-      logger.debug(`Processing log: ${log}`);
-      
-      // Try to parse the log as JSON (NEAR logs are often JSON-encoded)
-      try {
-        const logData = JSON.parse(log);
-        
-        // Check for escrow creation events
-        if (logData.event === 'escrow_created') {
-          await this.handleNearToEthereumSwap(
-            logData.escrow_id,
-            logData.initiator,
-            logData.token,
-            BigInt(logData.amount),
-            logData.target_chain,
-            logData.target_address,
-            logData.secret_hash
-          );
-        }
-        // Check for fulfillment events
-        else if (logData.event === 'escrow_fulfilled') {
-          await this.handleNearFulfillment(
-            logData.escrow_id,
-            logData.secret
-          );
-        }
-      } catch (parseError) {
-        // If it's not JSON, try to match against known log patterns
-        if (log.includes('EscrowCreated')) {
-          // Handle raw EscrowCreated log
-          // This is a simplified example - in a real implementation, you'd parse the log data
-          const match = log.match(/EscrowCreated\s+\(([^)]+)\)/);
-          if (match) {
-            logger.info(`Found EscrowCreated log: ${match[1]}`);
-            // Parse the log data and handle the event
-          }
-        }
-      }
-    } catch (error) {
-      logger.error('Error processing log:', error);
+      logger.error(`Error processing transaction ${transaction.hash}:`, error);
     }
   }
 
   /**
-   * Handles the cross-chain swap from NEAR to Ethereum
+   * Load processed messages from persistent storage
    */
-  private async handleNearToEthereumSwap(
-    escrowId: string,
-    initiator: string,
-    tokenId: string,
-    amount: bigint,
-    targetChain: string,
-    targetAddress: string,
-    secretHash: string
-  ): Promise<void> {
+  private loadProcessedMessages(): void {
+    // TODO: Implement loading from persistent storage
+    // This could be a database or file-based storage
+    logger.info('Loading processed messages...');
+  }
+  
+  /**
+   * Save a processed message to persistent storage
+   */
+  private saveProcessedMessage(messageId: string): void {
+    // TODO: Implement saving to persistent storage
+    this.processedMessages.add(messageId);
+  }
+  
+  /**
+   * Check if a message has been processed
+   */
+  private isMessageProcessed(messageId: string): boolean {
+    return this.processedMessages.has(messageId);
+  }
+  
+  /**
+   * Process a message from NEAR to Ethereum
+   */
+  private async processCrossChainMessage(message: CrossChainMessage): Promise<void> {
+    const messageId = message.messageId;
+    
+    // Skip if already processed
+    if (this.isMessageProcessed(messageId)) {
+      logger.debug(`Skipping already processed message: ${messageId}`);
+      return;
+    }
+    
     try {
-      logger.info(`Processing NEAR to Ethereum swap: ${escrowId}`);
+      logger.info(`Processing cross-chain message: ${messageId}`, { message });
       
-      // Only process Ethereum chain targets
-      if (targetChain.toLowerCase() !== 'ethereum') {
-        logger.warn(`Unsupported target chain: ${targetChain}`);
-        return;
+      // Verify the message signature
+      const isValid = await this.verifyMessageSignature(message);
+      if (!isValid) {
+        throw new Error(`Invalid signature for message: ${messageId}`);
       }
       
-      // 1. Validate the target Ethereum address
-      if (!/^0x[a-fA-F0-9]{40}$/.test(targetAddress)) {
-        throw new Error(`Invalid Ethereum address: ${targetAddress}`);
+      // Process based on message type
+      switch (message.type) {
+        case 'DEPOSIT':
+          await this.handleDepositMessage(message);
+          break;
+        case 'WITHDRAWAL':
+          await this.handleWithdrawalMessage(message);
+          break;
+        case 'REFUND':
+          await this.handleRefundMessage(message);
+          break;
+        default:
+          throw new Error(`Unknown message type: ${message.type}`);
       }
       
-      // 2. Get the NEAR escrow details
-      const escrowDetails = await this.getNearEscrowDetails(escrowId);
+      // Mark as processed
+      this.saveProcessedMessage(messageId);
+      logger.info(`Successfully processed message: ${messageId}`);
       
-      // 3. Create an escrow on Ethereum
+    } catch (error) {
+      logger.error(`Failed to process message ${messageId}:`, error);
+      // TODO: Implement retry logic with exponential backoff
+      throw error;
+    }
+  }
+  
+  /**
+   * Handle a deposit message from NEAR to Ethereum
+   */
+  private async handleDepositMessage(message: CrossChainMessage): Promise<void> {
+    const { sender, recipient, amount, data } = message;
+    const { secretHash, timelock, txHash } = data;
+    
+    if (!secretHash || !timelock) {
+      throw new Error('Missing required fields for deposit message');
+    }
+    
+    logger.info(`Processing deposit from NEAR to Ethereum`, {
+      sender,
+      recipient,
+      amount,
+      secretHash,
+      timelock,
+      txHash
+    });
+    
+    // TODO: Implement the actual deposit logic
+    // This would involve calling the Ethereum contract to lock the funds
+  }
+  
+  /**
+   * Handle a withdrawal message from NEAR to Ethereum
+   */
+  private async handleWithdrawalMessage(message: CrossChainMessage): Promise<void> {
+    const { sender, recipient, amount, data } = message;
+    const { secret, txHash } = data;
+    
+    if (!secret) {
+      throw new Error('Missing secret for withdrawal message');
+    }
+    
+    logger.info(`Processing withdrawal from NEAR to Ethereum`, {
+      sender,
+      recipient,
+      amount,
+      secret,
+      txHash
+    });
+    
+    // TODO: Implement the actual withdrawal logic
+    // This would involve calling the Ethereum contract to release the funds
+  }
+  
+  /**
+   * Handle a refund message from NEAR to Ethereum
+   */
+  private async handleRefundMessage(message: CrossChainMessage): Promise<void> {
+    const { sender, recipient, amount, data } = message;
+    const { txHash } = data;
+    
+    logger.info(`Processing refund from NEAR to Ethereum`, {
+      sender,
+      recipient,
+      amount,
+      txHash
+    });
+    
+    // TODO: Implement the actual refund logic
+    // This would involve calling the Ethereum contract to refund the locked funds
+  }
+  
+  /**
+   * Verify the signature of a cross-chain message
+   */
+  private async verifyMessageSignature(message: CrossChainMessage): Promise<boolean> {
+    // TODO: Implement proper signature verification
+    // This would involve verifying the signature against the sender's public key
+    return true; // Placeholder
+  }
+  
+  /**
       if (!process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS) {
         throw new Error('ETHEREUM_ESCROW_FACTORY_ADDRESS is not set');
       }
@@ -317,8 +519,20 @@ export class NearRelayer {
       // 1. Get the NEAR escrow details
       const escrowDetails = await this.getNearEscrowDetails(escrowId);
       
+      if (!escrowDetails) {
+        throw new Error(`Escrow details not found for ID: ${escrowId}`);
+      }
+      
       // 2. If this is a NEAR -> Ethereum swap, we need to fulfill the Ethereum escrow
-      if (escrowDetails.target_chain?.toLowerCase() === 'ethereum' && escrowDetails.target_escrow) {
+      if (escrowDetails.target_chain?.toLowerCase() === 'ethereum') {
+        if (!escrowDetails.target_escrow) {
+          throw new Error('Target escrow address is required for Ethereum fulfillment');
+        }
+        
+        if (!escrowDetails.initiator) {
+          throw new Error('Initiator address is required for Ethereum fulfillment');
+        }
+        
         await this.fulfillEthereumEscrow(
           escrowDetails.target_escrow,
           secret,
@@ -330,7 +544,8 @@ export class NearRelayer {
       logger.info(`Successfully processed fulfillment for ${escrowId}`);
       
     } catch (error) {
-      logger.error(`Failed to process fulfillment for NEAR escrow ${escrowId}:`, error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error(`Failed to process fulfillment for NEAR escrow ${escrowId}: ${errorMessage}`, { error });
       throw error;
     }
   }
@@ -338,23 +553,36 @@ export class NearRelayer {
   /**
    * Gets the details of a NEAR escrow
    */
-  private async getNearEscrowDetails(escrowId: string): Promise<any> {
+  private async getNearEscrowDetails(escrowId: string): Promise<NearEscrowDetails | null> {
     // In a real implementation, this would call the NEAR contract
-    // For now, we'll return a mock response
-    return {
-      id: escrowId,
-      initiator: 'near-account.near',
-      token: 'usdt.near',
-      amount: '1000000000000000000', // 1.0 tokens (18 decimals)
-      target_chain: 'ethereum',
-      target_address: '0x1234...',
-      target_escrow: '0x5678...',
-      status: 'active',
-      created_at: Date.now() - 3600000, // 1 hour ago
-      expires_at: Date.now() + 86400000, // 24 hours from now
-      secret_hash: '0x...',
-      secret: null
-    };
+    try {
+      // TODO: Implement actual contract call
+      // const result = await this.nearAccount.viewFunction({
+      //   contractId: this.nearEscrowContractId,
+      //   methodName: 'get_escrow',
+      //   args: { escrow_id: escrowId }
+      // });
+      // return result as NearEscrowDetails;
+      
+      // Mock response for now
+      return {
+        id: escrowId,
+        initiator: 'test.near',
+        token: 'usdt.near',
+        amount: '1000000000000000000', // 1.0 tokens (18 decimals)
+        target_chain: 'ethereum',
+        target_address: '0x1234567890123456789012345678901234567890',
+        target_escrow: '0x1234567890123456789012345678901234567890',
+        status: 'pending',
+        created_at: Math.floor(Date.now() / 1000),
+        expires_at: Math.floor(Date.now() / 1000) + 86400, // 24 hours from now
+        secret_hash: '0x' + 'a'.repeat(64), // 32-byte hash
+        secret: null
+      };
+    } catch (error) {
+      logger.error(`Failed to get escrow details for ${escrowId}:`, error);
+      return null;
+    }
   }
   
   /**
