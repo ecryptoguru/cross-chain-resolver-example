@@ -1,0 +1,19 @@
+{
+  "name": "deploy-scripts",
+  "version": "1.0.0",
+  "description": "TypeScript deployment scripts for cross-chain resolver",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "deploy:near-bridge": "ts-node src/deploy-near-bridge.ts",
+    "deploy:escrow": "ts-node src/deploy-escrow.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.13.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

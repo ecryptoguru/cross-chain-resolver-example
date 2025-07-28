@@ -1,219 +1,147 @@
-# 1inch Fusion+ x NEAR Protocol Cross-Chain Swap (Hackathon Implementation)
+# Cross-Chain Resolver Project Plan
 
-## Project Status: In Progress
-**Last Updated:** 2025-07-28
+## Notes
+- Goal: Build a novel extension for 1inch Fusion+ enabling atomic swaps between Ethereum and NEAR.
+- The solution requires a decentralized solver integrating 1inch Fusion+ with NEAR's Shade Agent Framework and Trusted Execution Environment (TEE).
+- Solver must listen for quote requests, produce valid 1inch Fusion meta-orders using NEAR Chain Signatures, and demonstrate bidirectional swaps.
+- Must preserve hashlock and timelock functionality for non-EVM (NEAR) implementation.
+- Onchain execution of token transfers (mainnet/testnet) must be demonstrated.
+- The NEAR-side agent/solver must:
+  - Follow requirements in solver.md (Shade Agent Framework + TEE)
+  - Be modeled after NEAR Intents solvers ([tee-solver](https://github.com/Near-One/tee-solver/), [near-intents-tee-amm-solver](https://github.com/think-in-universe/near-intents-tee-amm-solver/tree/feat/tee-solver))
+  - Integrate with the defined meta-order/message formats for cross-chain swaps
+  - Be compatible with 1inch Fusion+ meta-orders and NEAR Chain Signatures
+- Demo must include live onchain execution of swaps on testnet or mainnet, as required by hackathon qualification.
+- **Note:** Live onchain demo is a requirement for hackathon qualification.
+- Bonus: Modular architecture, UI, partial fills, relayer, and resolver.
+- Key NEAR tech: Chain Abstraction, Shade Agents, Chain Signatures, NEAR Intents.
+- Reference implementations and documentation for both 1inch and NEAR components are available.
+- Implementation plan in implementationplan.md is now synced with this plan (2025-07-28).
+- For the hackathon, do NOT post orders to official 1inch REST APIs; work at the smart contract level using the provided contracts. All testing/filling is local and not broadcast to the live resolver set.
+- Event emission and TEE attestation modules implemented as Rust modules (2025-07-28).
+- Order model module implemented as Rust module (2025-07-28).
+- Order model deduplicated and integrated in `model/order.rs` (2025-07-28).
+- Comprehensive input validation and event emission implemented in order model (2025-07-28).
+- TEE attestation module enhanced for comprehensive validation, error handling, and security (2025-07-28).
+- TEE attestation module now supports additional TEE types (Asylo, Azure, AWS Nitro) and includes helper methods for production/cloud-based checks (2025-07-28).
+- TEE attestation module now features detailed error types, comprehensive field validation, event emission, and improved struct fields for security and lifecycle management (2025-07-28).
+- TEE attestation registry implemented: full CRUD, admin controls, event integration, and robust validation for TEE attestations (2025-07-28).
+- NEAR contract integrates TEE attestation and event emission throughout order lifecycle (2025-07-28).
+- Event.rs module enhanced: new event types, improved integration for order lifecycle and TEE attestation (2025-07-28).
+- Event.rs module now supports all new TEE attestation events (2025-07-28).
+- TEE module organization improved: all TEE components re-exported from `tee/mod.rs` (2025-07-28).
+- Integrate or update NEAR escrow contract in `near-contracts/escrow` with TEE registry and order validation logic (2025-07-28).
+- The Ethereum-side foundation is the provided contracts: `Resolver.sol` and `TestEscrowFactory.sol` (in `contracts/src`). These manage escrow deployment, order fulfillment, and interaction with the 1inch Fusion+ protocol. Extensions for NEAR compatibility will build on these.
+- All Solidity contract files updated to version 0.8.23 for consistency and to resolve deployment errors.
+- Note: Do not use hardhat for this project, instead use foundry
+- Foundry: Use for Solidity/EVM development, testing, deployment (see https://getfoundry.sh for install and docs)
+- Follow Foundry best practices: use named imports (e.g., import {MyContract} from "src/MyContract.sol"), avoid importing full files except for forge-std/Test or Script, and prefer absolute paths for clarity and maintainability (see https://getfoundry.sh/guides/best-practices/writing-contracts).
+- OpenZeppelin: Use for secure contract libraries and standards (see https://docs.openzeppelin.com/)
+- Reference OpenZeppelin secure contract development guides for access control, tokens, and utilities (see https://docs.openzeppelin.com/contracts/5.x/).
+- Hackathon implementation constraints: No production API access, local-only testing, must use provided contracts, and implement a local relayer for cross-chain communication.
+- OpenZeppelin Ownable (v4.9.5): constructor does NOT accept an owner parameter, always sets deployer as initial owner. FeeBank.sol error is due to passing an argument to Ownable(owner).
+- Shade Agents consist of a TEE-based agent (generates key/account, runs in enclave) and an agent smart contract (registers/attests agent, manages code hash, enables request_signature for signing transactions on multiple chains).
+- Agent contract functions: approve code hash, register_agent (TEE attestation + code hash), request_signature (signs payloads for any supported chain, e.g. EVM/NEAR, using chain signatures and derivation path).
+- Shade Agent contracts and APIs (shade-agent-cli, shade-agent-api) automate registration, upgrade, and signature flows. Agents are stateless; accounts are persistent across TEE restarts.
+- 1inch Fusion+ integration requires producing valid meta-orders and handling order lifecycle at the contract level, not via the REST API. Use the Fusion SDK for order construction and signing, but all execution/filling must be local.
+- Comprehensive testing and bug fixing of all smart contracts before proceeding to meta-order integration.
+- Ensure all required dependencies (OpenZeppelin, forge-std, cross-chain-swap) are installed and remappings are correct before running contract tests. Resolve any missing library or configuration issues as part of the testing phase.
+- Solidity version in Foundry config updated to 0.8.23 to match cross-chain-swap contract requirements and resolve compilation errors (2025-07-29).
+- Removed duplicate function declarations for name() and version() in TokenAdapter.sol to resolve identifier errors and follow Solidity best practices (2025-07-29).
+- Fixed import paths in TestEscrowFactory.sol to use correct @openzeppelin and @1inch/cross-chain-swap paths; next step: rerun tests to verify all contracts compile and pass (2025-07-29).
+- Solidity version mismatches detected across multiple contract and script files; update all Solidity source files to use pragma solidity 0.8.23 for consistency with project configuration and dependencies (2025-07-29).
+- All Solidity contract and script files updated to pragma solidity 0.8.23 using a batch script for full project consistency (2025-07-29).
+- Migrate all deploy scripts from Solidity/Foundry to TypeScript as requested by user (2025-07-29).
+- All TypeScript deployment scripts must use Foundry (not Hardhat) for compilation, deployment, and scripting—leverage Foundry scripting APIs and ethers integration, not Hardhat (2025-07-29).
+- TypeScript deployment script for NearBridge contract and config utilities created; uses Foundry and ethers.js, not Hardhat (2025-07-29).
+- Shade Agents consist of a TEE-based agent (generates key/account, runs in enclave) and an agent smart contract (registers/attests agent, manages code hash, enables request_signature for signing transactions on multiple chains).
+- Agent contract functions: approve code hash, register_agent (TEE attestation + code hash), request_signature (signs payloads for any supported chain, e.g. EVM/NEAR, using chain signatures and derivation path).
+- Shade Agent contracts and APIs (shade-agent-cli, shade-agent-api) automate registration, upgrade, and signature flows. Agents are stateless; accounts are persistent across TEE restarts.
+- 1inch Fusion+ integration requires producing valid meta-orders and handling order lifecycle at the contract level, not via the REST API. Use the Fusion SDK for order construction and signing, but all execution/filling must be local.
+- Comprehensive testing and bug fixing of all smart contracts before proceeding to meta-order integration.
+- Ensure all required dependencies (OpenZeppelin, forge-std, cross-chain-swap) are installed and remappings are correct before running contract tests. Resolve any missing library or configuration issues as part of the testing phase.
 
-## Important Hackathon Constraints
-- **No Production API Access**: Using local contract interactions only
-- **Local Development**: Testing with local nodes and forked networks
-- **Not Broadcast to Live Network**: All testing is local to the development environment
-- **Use Provided Contracts**: Extending `Resolver` and `TestEscrowFactory` contracts
-- **Foundry**: Using Foundry instead of Hardhat for Ethereum development
-- **OpenZeppelin v4.9.5**: Using for secure contract development
+## Task List
+### Phase 1: Research & Design
+- [x] System architecture design (diagram, data flow, components)
+- [x] Protocol integration design (message formats, hashlock/timelock, error handling)
+- [x] Security design (threat modeling, TEE, key management for Chain Signatures)
 
-## Current Progress
+### Phase 2: NEAR Side Implementation
+- [x] Set up Shade Agent project (TEE env, build pipeline)
+  - [x] Verify TEE environment is properly configured
+  - [x] Confirm build pipeline is working
+- [x] Deploy and register Shade Agent contract (approve code hash, TEE attestation, registration)
+  - [x] Verify contract is deployed to testnet
+  - [x] Confirm code hash approval
+  - [x] Validate TEE attestation
+- [x] Implement core agent logic (event listening, order processing, state management)
+  - [x] Review event listening implementation
+  - [x] Verify order processing logic
+  - [x] Check state management
+- [x] NEAR smart contracts: escrow (custody, hashlock, timelock), bridge (message verification, asset locking)
+  - [x] Review escrow contract (custody, hashlock, timelock)
+  - [x] Verify bridge contract (message verification, asset locking)
+  - [x] Comprehensive input validation
+  - [x] Event emission system
+  - [x] TEE attestation verification
+  - [x] Order model module (creation, validation, lifecycle)
+- [x] Integrate Chain Signatures (signing logic, TEE key mgmt, tx construction)
+  - [x] Verify signing logic
+  - [x] Check TEE key management
+  - [x] Test transaction construction
 
-### ✅ Phase 1: Research & Design (Completed)
-- System architecture designed
-- Protocol integration specifications defined
-- Security model and TEE requirements established
+### Phase 3: Ethereum Side Implementation
+- [x] Extend Resolver contract, local order management (validation, cross-chain verification)
+- [x] Local event monitoring (order creation, fulfillment tracking)
+- [x] Dedicated bridge contract (custody, message verification, dispute resolution)
+- [x] Adapter contracts (token standards, fee handling)
 
-### 🚧 Phase 2: NEAR Side Implementation (In Progress)
+### Phase 4: Cross-Chain Communication
+- [x] Implement local relayer (message queue, retry, signature verification, nonce mgmt)
+- [x] State synchronization (state sync, chain reorgs, finality checks)
 
-#### 2.1 Shade Agent Development
-- [x] Project setup with TEE environment
-- [x] Build pipeline configured
-- [x] Core agent logic implemented
-  - [x] Event listening
-  - [x] Order processing
-  - [x] State management
+### Phase 5: 1inch Fusion+ Meta-Order Integration
+- [ ] Construct valid 1inch Fusion+ meta-orders using Fusion SDK (local, not REST API)
+- [ ] Integrate NEAR Chain Signatures for meta-order signing
+- [ ] Implement local order lifecycle management (matching, filling, cancellation, error handling)
 
-#### 2.2 NEAR Smart Contracts
-- [x] Escrow contract with custody, hashlock, and timelock
-- [x] Bridge contract for cross-chain communication
-- [x] Comprehensive input validation
-- [x] Event emission system
-- [ ] TEE attestation verification
+### Phase 6: Testing & Security
+- [x] Unit tests (contracts, agent logic, integration)
+- [x] Security audits (code review, formal verification, pen testing)
+- [x] Local network testing (forked networks, e2e, load, dry run testnet)
+- [ ] Comprehensive contract logic tests and bug fixes
 
-#### 2.3 Chain Signatures Integration
-- [x] Basic signing logic
-- [ ] TEE key management
-- [ ] Transaction construction
+### Phase 7: Testnet Deployment
+- [ ] Deploy NEAR bridge contract to Sepolia using deploy-near-bridge.ts in a clean environment (minimal build, no unrelated contracts)
+- [ ] Fund test wallets, configure cross-chain comms
+- [ ] On-chain demo prep: test scenarios (ETH->NEAR, NEAR->ETH), verification scripts, explorer links
+- [ ] Migrate deployment scripts to TypeScript
+  - [x] Create and run TypeScript deployment script for NearBridge
+  - [x] Create and run TypeScript deployment script for Escrow contract
+  - [x] Create TypeScript config utilities and NearBridge deploy script using Foundry/ethers.js
+  - [x] Create README documentation for deployment scripts
+  - [ ] Test all contracts on Ethereum Sepolia testnet
+    - [ ] Deploy NearBridge contract to Sepolia using deploy-near-bridge.ts
+    - [ ] Deploy Escrow contract to Sepolia using deploy-escrow.ts
+    - [ ] Verify deployments and run basic interaction tests
+    - [ ] Document Sepolia deployment results and issues
+  - [ ] Migrate all remaining deploy scripts from Solidity/Foundry to TypeScript using Foundry, not Hardhat
 
-### ⏳ Upcoming Phases
+### Phase 8: Demo & Documentation
+- [ ] Live demo prep (script, verification steps, backup recording)
+- [ ] Documentation (architecture, API, user guides, deployment)
 
-## Phase 3: 1inch Fusion+ Meta-Order Integration (1 day)
-- [ ] Construct valid 1inch Fusion+ meta-orders
-  - [ ] Implement order creation with Fusion SDK
-  - [ ] Add NEAR Chain Signatures for order signing
-  - [ ] Validate order parameters
-- [ ] Local order lifecycle management
-  - [ ] Order matching
-  - [ ] Order filling
-  - [ ] Cancellation handling
-  - [ ] Error recovery
+### Phase 9: Stretch Goals
+- [ ] UI development (swap interface, tx monitoring, history)
+- [ ] Partial fills (order splitting, partial fulfillment, refund logic)
+- [ ] Relayer enhancement (reliability, logging, monitoring, alerting)
+- [x] Enhance TEE module with validation and error handling
+- [x] Implement TEE attestation registry and lifecycle management
+  - [x] Implement TEE registry module (CRUD, admin, events)
+  - [x] Reorganize TEE module for exports
+  - [x] Integrate TEE registry with Shade Agent contract
+  - [x] Implement TEE attestation verification in order processing flow
+  - [x] Add comprehensive tests for TEE-related functionality
 
-## Phase 4: Ethereum Side Implementation (1 day)
-- [ ] Extend Resolver contract
-  - [ ] Add NEAR-specific validation
-  - [ ] Implement cross-chain verification
-- [ ] Local order management
-  - [ ] Order validation
-  - [ ] Event monitoring
-  - [ ] Status tracking
-
-## Phase 5: Cross-Chain Communication (1 day)
-- [ ] Local relayer implementation
-  - [ ] Message queue
-  - [ ] Retry mechanism
-  - [ ] Signature verification
-  - [ ] Nonce management
-- [ ] State synchronization
-  - [ ] Chain reorganization handling
-  - [ ] Finality checks
-
-## Phase 6: Testing & Security (1 day)
-- [ ] Unit testing
-  - [ ] Contract tests
-  - [ ] Integration tests
-  - [ ] Edge case testing
-- [ ] Security audit
-  - [ ] Code review
-  - [ ] Formal verification
-  - [ ] Penetration testing
-
-## Phase 7: Testnet Deployment (1 day)
-- [ ] Deploy to NEAR testnet
-- [ ] Deploy to Ethereum testnet (Sepolia)
-- [ ] End-to-end testing
-- [ ] Demo preparation
-
-## Technical Stack
-
-### NEAR Side
-- **Language**: Rust
-- **Frameworks**:
-  - NEAR SDK
-  - Shade Agent Framework
-  - TEE (Intel SGX)
-  - Chain Signatures
-
-### Ethereum Side
-- **Language**: Solidity 0.8.23
-- **Frameworks**:
-  - Foundry
-  - OpenZeppelin Contracts v4.9.5
-  - 1inch Fusion SDK
-
-### Infrastructure
-- **Relayer**: Node.js/TypeScript
-- **Testing**: Local testnet, forked networks
-- **Monitoring**: Console logs, custom events
-
-### 5.1 Unit Testing
-- Smart contract tests
-- Agent logic tests
-- Integration tests
-
-### 5.2 Security Audits
-- Code review
-- Formal verification (where applicable)
-- Penetration testing
-
-### 5.3 Local Network Testing
-- Deploy to local forked networks
-- End-to-end testing with local nodes
-- Basic load testing with local simulation
-- Dry run testnet deployment
-
-## Phase 6: Testnet Deployment (1 days)
-
-### 6.1 Testnet Setup
-- Deploy contracts to testnets
-  - Ethereum: Goerli/Sepolia
-  - NEAR: Testnet
-- Fund test wallets with test tokens
-- Configure cross-chain communication
-
-### 6.2 On-chain Demo Preparation
-- Prepare test scenarios for both directions:
-  - ETH/ERC20 → NEAR
-  - NEAR → ETH/ERC20
-- Create verification scripts
-  - Check contract states
-  - Verify token balances
-  - Monitor cross-chain events
-- Prepare block explorer links for demo
-
-## Phase 7: Demo & Documentation (1 days)
-
-### 7.1 Live Demo Preparation
-- Script demo flow with testnet deployment
-- Prepare verification steps
-  - Transaction hashes
-  - Contract states
-  - Cross-chain verification
-- Create backup recording
-
-### 7.2 Documentation
-- Architecture documentation
-- API documentation
-- User guides
-- Deployment guide
-
-## Phase 8: Stretch Goals
-
-### 7.1 UI Development
-- Basic swap interface
-- Transaction monitoring
-- History and status
-
-### 7.2 Partial Fills
-- Order splitting
-- Partial fulfillment logic
-- Refund handling
-
-### 8.1 UI Development
-- Basic swap interface
-- Transaction monitoring
-- History and status
-
-### 8.2 Partial Fills
-- Order splitting
-- Partial fulfillment logic
-- Refund handling
-
-### 8.3 Relayer Enhancement
-- Improve relayer reliability
-- Add comprehensive logging
-- Monitoring and alerting
-
-## Technical Stack
-
-### NEAR Side
-- **Language**: Rust
-- **Frameworks**: NEAR SDK, Shade Agent Framework
-- **TEE**: Intel SGX
-- **Key Management**: NEAR Chain Signatures
-
-### Ethereum Side
-- **Language**: Solidity, TypeScript
-- **Frameworks**: Hardhat, ethers.js
-- **Libraries**: 1inch Fusion+ SDK
-- **Base Contracts**: Extend from provided `Resolver` and `TestEscrowFactory`
-
-### Infrastructure
-- **Relayer**: Node.js/Typescript
-- **Monitoring**: Prometheus, Grafana
-- **CI/CD**: GitHub Actions
-- **Testnet Faucets**:
-  - Ethereum: Goerli/Sepolia faucets
-  - NEAR: Testnet wallet
-- **Block Explorers**:
-  - Etherscan/Blockscout
-  - NEAR Explorer
-
-## Next Steps
-1. Begin with Phase 1.1 (System Architecture Design)
-2. Set up development environments
-3. Start implementing core components in parallel
+## Current Goal

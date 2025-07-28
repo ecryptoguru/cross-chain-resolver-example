@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.30;
+pragma solidity 0.8.23;
 
-import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import "cross-chain-swap/EscrowFactory.sol";
-import "cross-chain-swap/interfaces/IBaseEscrow.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@1inch-cross-chain-swap/EscrowFactory.sol";
+import "@1inch-cross-chain-swap/interfaces/IBaseEscrow.sol";
 
 /**
  * @title TestEscrowFactory with NEAR Protocol Support
