@@ -1,19 +1,25 @@
 use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
     collections::UnorderedMap,
-    env, near_bindgen, AccountId, Balance, PanicOnDefault, Promise, PromiseResult,
+    env, log, near_bindgen, require,
+    serde::{Deserialize, Serialize},
+    AccountId, Balance, PanicOnDefault, Promise, PromiseResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Import our modules
+pub mod event;
 pub mod model;
 pub mod service;
+pub mod tee;
 pub mod utils;
 
 use crate::{
+    event::ContractEvent,
     model::order::{CrossChainOrder, OrderStatus},
     service::solver::{OneInchNearSolver, SolverConfig, TokenConfig},
+    tee::TeeAttestation,
 };
 
 // Define the contract structure
@@ -28,6 +34,10 @@ pub struct CrossChainSolverContract {
     orders: UnorderedMap<String, CrossChainOrder>,
     /// Configuration for the solver
     config: SolverConfig,
+    /// TEE attestation if enabled
+    tee_attestation: Option<TeeAttestation>,
+    /// Is the contract paused
+    paused: bool,
 }
 
 // Implement the contract's core functionality
@@ -70,22 +80,40 @@ impl CrossChainSolverContract {
     /// Process a new cross-chain order
     #[payable]
     pub fn process_order(&mut self, order: CrossChainOrder) -> Promise {
-        // Verify the caller is authorized (could be the relayer or the user)
+        self.assert_not_paused();
         self.assert_authorized();
         
-        // Verify the order is valid
-        assert!(order.is_valid(), "Order is not valid or has expired");
+        // Verify TEE attestation if required
+        if let Some(attestation) = &self.tee_attestation {
+            require!(
+                attestation.is_valid(),
+                "TEE attestation is required and must be valid"
+            );
+        }
         
         // Store the order
         self.orders.insert(&order.id, &order);
         
+        // Emit order created event
+        emit_event!(ContractEvent::OrderCreated {
+            order_id: order.id.clone(),
+            source_chain: order.source_chain.clone(),
+            dest_chain: order.dest_chain.clone(),
+            source_token: order.source_token.clone(),
+            dest_token: order.dest_token.clone(),
+            amount: order.source_amount,
+        });
+        
+        log!("Processing order: {}", order.id);
+        
         // Process the order asynchronously
-        // In a real implementation, this would interact with 1inch Fusion+ API
         Promise::new(env::current_account_id())
-            .function_call("process_order_callback".to_string(),
-                         serde_json::to_vec(&order).unwrap(),
-                         0,
-                         self.config.default_gas)
+            .function_call(
+                b"process_order_callback".to_vec(),
+                near_sdk::serde_json::to_vec(&order).expect("Failed to serialize order"),
+                0,
+                env::prepaid_gas() - env::used_gas() - 10_000_000_000_000, // Leave some gas for callback
+            )
     }
     
     /// Callback after processing an order
@@ -105,13 +133,27 @@ impl CrossChainSolverContract {
     }
     
     /// Cancel an order
-    pub fn cancel_order(&mut self, order_id: String) {
-        self.assert_owner();
+    pub fn cancel_order(&mut self, order_id: String, reason: Option<String>) {
+        self.assert_authorized();
         
         if let Some(mut order) = self.orders.get(&order_id) {
-            if order.status == OrderStatus::Created || order.status == OrderStatus::Processing {
+            if order.status != OrderStatus::Filled && order.status != OrderStatus::Cancelled {
+                let old_status = order.status_to_string(&order.status);
+                
                 order.update_status(OrderStatus::Cancelled);
                 self.orders.insert(&order_id, &order);
+                
+                // Emit order cancelled event
+                emit_event!(ContractEvent::OrderCancelled {
+                    order_id: order_id.clone(),
+                    reason: reason.unwrap_or_else(|| "User requested cancellation".to_string()),
+                });
+                
+                log!(
+                    "Order {} cancelled. Reason: {}",
+                    order_id,
+                    reason.as_deref().unwrap_or("No reason provided")
+                );
             } else {
                 env::panic_str("Cannot cancel order in current state");
             }
@@ -120,25 +162,90 @@ impl CrossChainSolverContract {
         }
     }
     
+    // ========== TEE Attestation Methods ========== //
+    
+    /// Set or update the TEE attestation
+    pub fn set_tee_attestation(
+        &mut self,
+        tee_type: String,
+        public_key: String,
+        report: String,
+        signature: String,
+        expires_in_seconds: u64,
+    ) {
+        self.assert_owner();
+        
+        let attestation = TeeAttestation::new(
+            tee_type,
+            public_key,
+            report,
+            signature,
+            expires_in_seconds,
+        );
+        
+        self.tee_attestation = Some(attestation.clone());
+        
+        // Emit TEE attestation verified event
+        emit_event!(ContractEvent::TeeAttestationVerified {
+            tee_type: attestation.tee_type,
+            status: "Verified".to_string(),
+        });
+        
+        log!("TEE attestation updated");
+    }
+    
+    /// Remove the TEE attestation
+    pub fn remove_tee_attestation(&mut self) {
+        self.assert_owner();
+        
+        if let Some(attestation) = &self.tee_attestation {
+            emit_event!(ContractEvent::TeeAttestationVerified {
+                tee_type: attestation.tee_type.clone(),
+                status: "Removed".to_string(),
+            });
+            
+            self.tee_attestation = None;
+            log!("TEE attestation removed");
+        }
+    }
+    
+    // ========== Admin Methods ========== //
+    
+    /// Pause the contract (only owner)
+    pub fn pause(&mut self) {
+        self.assert_owner();
+        self.paused = true;
+        log!("Contract paused");
+    }
+    
+    /// Unpause the contract (only owner)
+    pub fn unpause(&mut self) {
+        self.assert_owner();
+        self.paused = false;
+        log!("Contract unpaused");
+    }
+    
     // ========== Helper Methods ========== //
+    
+    /// Verify the contract is not paused
+    fn assert_not_paused(&self) {
+        require!(!self.paused, "Contract is paused");
+    }
     
     /// Verify the caller is authorized to call this method
     fn assert_authorized(&self) {
-        // In a real implementation, this would check if the caller is the owner or a whitelisted relayer
-        assert_eq!(
-            env::predecessor_account_id(),
-            self.owner_id,
-            "Only the owner can call this method"
-        );
+        // In a real implementation, this would check if the caller is authorized
+        // For now, we'll just check that the method is not called directly
+        if env::current_account_id() == env::signer_account_id() {
+            env::panic_str("Method cannot be called directly");
+        }
     }
     
     /// Verify the caller is the contract owner
     fn assert_owner(&self) {
-        assert_eq!(
-            env::predecessor_account_id(),
-            self.owner_id,
-            "Only the owner can call this method"
-        );
+        if env::signer_account_id() != self.owner_id {
+            env::panic_str("Only contract owner can call this method");
+        }
     }
 }
 

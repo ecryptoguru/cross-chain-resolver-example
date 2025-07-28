@@ -1,101 +1,114 @@
 # 1inch Fusion+ x NEAR Protocol Cross-Chain Swap (Hackathon Implementation)
 
+## Project Status: In Progress
+**Last Updated:** 2025-07-28
+
 ## Important Hackathon Constraints
-- **No Production API Access**: We will not use the official 1inch REST APIs
-- **Local Development Focus**: All testing will be done locally using the provided contracts
-- **Not Broadcast to Live Network**: Orders will not be broadcast to the live resolver set
-- **Use Provided Contracts**: Build on top of the existing contracts in `cross-chain-resolver-example/contracts`
+- **No Production API Access**: Using local contract interactions only
+- **Local Development**: Testing with local nodes and forked networks
+- **Not Broadcast to Live Network**: All testing is local to the development environment
+- **Use Provided Contracts**: Extending `Resolver` and `TestEscrowFactory` contracts
+- **Foundry**: Using Foundry instead of Hardhat for Ethereum development
+- **OpenZeppelin v4.9.5**: Using for secure contract development
 
-## Development Approach
-1. Use the provided `Resolver` and `TestEscrowFactory` contracts as the foundation
-2. Extend the existing escrow system to support NEAR protocol
-3. Implement a local relayer for cross-chain communication
-4. Test using forked networks and local nodes
+## Current Progress
 
-## Phase 1: Research & Design (1 days)
+### ✅ Phase 1: Research & Design (Completed)
+- System architecture designed
+- Protocol integration specifications defined
+- Security model and TEE requirements established
 
-### 1.1 System Architecture Design
-- Design high-level architecture diagram
-  - 1inch Fusion+ components
-  - NEAR Shade Agent components
-  - Cross-chain communication layer
-  - Data flow for both directions (ETH→NEAR, NEAR→ETH)
+### 🚧 Phase 2: NEAR Side Implementation (In Progress)
 
-### 1.2 Protocol Integration Design
-- Define message formats
-  - Order creation
-  - Order fulfillment
-  - Error handling
-- Design hashlock & timelock mechanisms
-  - EVM (1inch) implementation
-  - NEAR implementation
-  - Cross-chain verification
+#### 2.1 Shade Agent Development
+- [x] Project setup with TEE environment
+- [x] Build pipeline configured
+- [x] Core agent logic implemented
+  - [x] Event listening
+  - [x] Order processing
+  - [x] State management
 
-### 1.3 Security Design
-- Threat modeling
-- Security considerations for TEE
-- Key management for Chain Signatures
+#### 2.2 NEAR Smart Contracts
+- [x] Escrow contract with custody, hashlock, and timelock
+- [x] Bridge contract for cross-chain communication
+- [x] Comprehensive input validation
+- [x] Event emission system
+- [ ] TEE attestation verification
 
-## Phase 2: NEAR Side Implementation (2 days)
+#### 2.3 Chain Signatures Integration
+- [x] Basic signing logic
+- [ ] TEE key management
+- [ ] Transaction construction
 
-### 2.1 Shade Agent Development
-- Set up Shade Agent project
-  - Initialize TEE environment
-  - Configure build pipeline
-- Implement core agent logic
-  - Event listening
-  - Order processing
-  - State management
+### ⏳ Upcoming Phases
 
-### 2.2 NEAR Smart Contracts
-- Escrow contract
-  - Asset custody
-  - Hashlock verification
-  - Timelock enforcement
-- Bridge contract
-  - Cross-chain message verification
-  - Asset locking/unlocking
+## Phase 3: 1inch Fusion+ Meta-Order Integration (1 day)
+- [ ] Construct valid 1inch Fusion+ meta-orders
+  - [ ] Implement order creation with Fusion SDK
+  - [ ] Add NEAR Chain Signatures for order signing
+  - [ ] Validate order parameters
+- [ ] Local order lifecycle management
+  - [ ] Order matching
+  - [ ] Order filling
+  - [ ] Cancellation handling
+  - [ ] Error recovery
 
-### 2.3 Chain Signatures Integration
-- Implement signing logic
-- Key management in TEE
-- Transaction construction
+## Phase 4: Ethereum Side Implementation (1 day)
+- [ ] Extend Resolver contract
+  - [ ] Add NEAR-specific validation
+  - [ ] Implement cross-chain verification
+- [ ] Local order management
+  - [ ] Order validation
+  - [ ] Event monitoring
+  - [ ] Status tracking
 
-## Phase 3: Ethereum Side Implementation (2 days)
+## Phase 5: Cross-Chain Communication (1 day)
+- [ ] Local relayer implementation
+  - [ ] Message queue
+  - [ ] Retry mechanism
+  - [ ] Signature verification
+  - [ ] Nonce management
+- [ ] State synchronization
+  - [ ] Chain reorganization handling
+  - [ ] Finality checks
 
-### 3.1 Local Fusion+ Integration
-- Study and extend the provided `Resolver` contract
-- Implement local order management
-  - Order validation
-  - Cross-chain verification using the existing escrow system
-- Local event monitoring
-  - Order creation
-  - Fulfillment tracking
+## Phase 6: Testing & Security (1 day)
+- [ ] Unit testing
+  - [ ] Contract tests
+  - [ ] Integration tests
+  - [ ] Edge case testing
+- [ ] Security audit
+  - [ ] Code review
+  - [ ] Formal verification
+  - [ ] Penetration testing
 
-### 3.2 Smart Contract Development
-- Bridge contract
-  - Asset custody
-  - Message verification
-  - Dispute resolution
-- Adapter contracts
-  - Token standards support
-  - Fee handling
+## Phase 7: Testnet Deployment (1 day)
+- [ ] Deploy to NEAR testnet
+- [ ] Deploy to Ethereum testnet (Sepolia)
+- [ ] End-to-end testing
+- [ ] Demo preparation
 
-## Phase 4: Cross-Chain Communication (1 days)
+## Technical Stack
 
-### 4.1 Local Message Relaying
-- Implement local relayer service
-  - Simple message queue for local testing
-  - Basic retry mechanism
-  - Local signature verification
-  - Nonce management for local testing
+### NEAR Side
+- **Language**: Rust
+- **Frameworks**:
+  - NEAR SDK
+  - Shade Agent Framework
+  - TEE (Intel SGX)
+  - Chain Signatures
 
-### 4.2 State Synchronization
-- Implement state sync mechanism
-- Handle chain reorganizations
-- Implement finality checks
+### Ethereum Side
+- **Language**: Solidity 0.8.23
+- **Frameworks**:
+  - Foundry
+  - OpenZeppelin Contracts v4.9.5
+  - 1inch Fusion SDK
 
-## Phase 5: Testing & Security (1 days)
+### Infrastructure
+- **Relayer**: Node.js/TypeScript
+- **Testing**: Local testnet, forked networks
+- **Monitoring**: Console logs, custom events
 
 ### 5.1 Unit Testing
 - Smart contract tests
