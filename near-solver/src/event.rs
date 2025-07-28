@@ -35,6 +35,94 @@ impl ContractEvent {
         })
     }
 
+    /// Creates a new TEE registry unpaused event
+    pub fn new_tee_registry_unpaused(
+        unpauser_id: &str,
+    ) -> Result<Self, serde_json::Error> {
+        #[derive(Serialize)]
+        struct EventData {
+            unpauser_id: String,
+            timestamp: u64,
+        }
+        
+        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let data = EventData {
+            unpauser_id: unpauser_id.to_string(),
+            timestamp,
+        };
+        
+        Self::new("TEE_REGISTRY_UNPAUSED", serde_json::to_string(&data)?)
+    }
+    
+    /// Creates a new order processing started event
+    pub fn new_order_processing_started(
+        order_id: &str,
+        tee_public_key: &str,
+    ) -> Result<Self, serde_json::Error> {
+        #[derive(Serialize)]
+        struct EventData {
+            order_id: String,
+            tee_public_key: String,
+            timestamp: u64,
+        }
+        
+        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let data = EventData {
+            order_id: order_id.to_string(),
+            tee_public_key: tee_public_key.to_string(),
+            timestamp,
+        };
+        
+        Self::new("ORDER_PROCESSING_STARTED", serde_json::to_string(&data)?)
+    }
+    
+    /// Creates a new order processing completed event
+    pub fn new_order_processing_completed(
+        order_id: &str,
+        status: &str,
+    ) -> Result<Self, serde_json::Error> {
+        #[derive(Serialize)]
+        struct EventData {
+            order_id: String,
+            status: String,
+            timestamp: u64,
+        }
+        
+        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let data = EventData {
+            order_id: order_id.to_string(),
+            status: status.to_string(),
+            timestamp,
+        };
+        
+        Self::new("ORDER_PROCESSING_COMPLETED", serde_json::to_string(&data)?)
+    }
+    
+    /// Creates a new TEE attestation verification failed event
+    pub fn new_tee_verification_failed(
+        order_id: &str,
+        public_key: &str,
+        error: &str,
+    ) -> Result<Self, serde_json::Error> {
+        #[derive(Serialize)]
+        struct EventData {
+            order_id: String,
+            public_key: String,
+            error: String,
+            timestamp: u64,
+        }
+        
+        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let data = EventData {
+            order_id: order_id.to_string(),
+            public_key: public_key.to_string(),
+            error: error.to_string(),
+            timestamp,
+        };
+        
+        Self::new("TEE_VERIFICATION_FAILED", serde_json::to_string(&data)?)
+    }
+
     /// Emits the event to the blockchain
     pub fn emit(&self) {
         if let Ok(json) = serde_json::to_string(self) {
