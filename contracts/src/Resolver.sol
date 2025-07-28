@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.23;
+pragma solidity 0.8.30;
 
 import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -55,14 +55,126 @@ contract Resolver is Ownable {
         uint256 amount
     );
     
+    // Constants for NEAR integration
+    uint256 public constant NEAR_CHAIN_ID = 397;
+    uint256 public constant MIN_NEAR_DEPOSIT = 0.1 ether; // Minimum deposit amount
+    
+    // Struct to track NEAR deposits
+    struct NearDeposit {
+        address sender;
+        string nearRecipient;
+        uint256 amount;
+        bytes32 secretHash;
+        uint256 timelock;
+        bool withdrawn;
+    }
+    
+    // Mapping to track NEAR deposits by secret hash
+    mapping(bytes32 => NearDeposit) public nearDeposits;
+    
+    event NearWithdrawalCompleted(
+        bytes32 indexed secretHash,
+        string nearRecipient,
+        uint256 amount
+    );
+    
     event NearRefunded(
         bytes32 indexed secretHash,
         string nearRecipient,
         uint256 amount
     );
     
+    /**
+     * @dev Internal function to handle NEAR deposits
+     * @param immutables The immutables from the escrow
+     * @param secret The secret used for the hashlock
+     */
+    function _handleNearDeposit(
+        IBaseEscrow.Immutables memory immutables,
+        bytes32 secret
+    ) internal {
+        // Verify the deposit amount meets minimum requirements
+        require(immutables.amount.get() >= MIN_NEAR_DEPOSIT, "Deposit amount too low");
+        
+        // Generate secret hash from the provided secret
+        bytes32 secretHash = keccak256(abi.encodePacked(secret));
+        
+        // Store the NEAR deposit details
+        nearDeposits[secretHash] = NearDeposit({
+            sender: immutables.taker.get(),
+            nearRecipient: string(abi.encodePacked(immutables.recipient)),
+            amount: immutables.amount.get(),
+            secretHash: secretHash,
+            timelock: block.timestamp + 24 hours, // 24-hour timelock
+            withdrawn: false
+        });
+        
+        // Emit event for off-chain services to pick up
+        emit NearDepositInitiated(
+            immutables.taker.get(),
+            string(abi.encodePacked(immutables.recipient)),
+            immutables.amount.get(),
+            secretHash,
+            block.timestamp + 24 hours
+        );
+    }
+    
+    /**
+     * @dev Function to complete a NEAR withdrawal
+     * @param secret The secret that was used to create the hashlock
+     * @param nearRecipient The NEAR account that will receive the funds
+     */
+    function completeNearWithdrawal(
+        bytes32 secret,
+        string calldata nearRecipient
+    ) external {
+        bytes32 secretHash = keccak256(abi.encodePacked(secret));
+        NearDeposit storage deposit = nearDeposits[secretHash];
+        
+        // Verify the deposit exists and hasn't been withdrawn
+        require(deposit.amount > 0, "Deposit not found");
+        require(!deposit.withdrawn, "Already withdrawn");
+        require(block.timestamp <= deposit.timelock, "Timelock expired");
+        
+        // Mark as withdrawn to prevent reentrancy
+        deposit.withdrawn = true;
+        
+        // Transfer the funds to the NEAR bridge contract
+        // In a real implementation, this would interact with the NEAR bridge
+        // For now, we'll just emit an event
+        emit NearWithdrawalCompleted(
+            secretHash,
+            nearRecipient,
+            deposit.amount
+        );
+    }
+    
+    /**
+     * @dev Function to refund a NEAR deposit after the timelock expires
+     * @param secretHash The hash of the secret used for the deposit
+     */
+    function refundNearDeposit(bytes32 secretHash) external {
+        NearDeposit storage deposit = nearDeposits[secretHash];
+        
+        // Verify the deposit exists and hasn't been withdrawn
+        require(deposit.amount > 0, "Deposit not found");
+        require(!deposit.withdrawn, "Already withdrawn");
+        require(block.timestamp > deposit.timelock, "Timelock not expired");
+        
+        // Mark as withdrawn to prevent reentrancy
+        deposit.withdrawn = true;
+        
+        // In a real implementation, transfer the funds back to the original sender
+        // For now, we'll just emit an event
+        emit NearRefunded(
+            secretHash,
+            deposit.nearRecipient,
+            deposit.amount
+        );
+    }
+    
     // Constants for NEAR integration
-    address public constant NEAR_BRIDGE = 0x3FEFc5A022Bf1f57d3D1fDd5cc20c42e467E4bEe; // Example address, update with actual
+    address public constant NEAR_BRIDGE = 0x3fEFc5a022BF1f57d3d1FDd5Cc20C42e467e4bEe; // Fixed checksum address
     string public constant NEAR_TOKEN_CONTRACT = "wrap.near"; // NEAR token contract on NEAR
     
     // Mapping to track NEAR deposits
@@ -84,6 +196,84 @@ contract Resolver is Ownable {
     receive() external payable {} // solhint-disable-line no-empty-blocks
 
     /**
+     * @notice Initiate a deposit to NEAR bridge
+     * @param nearRecipient NEAR account ID of the recipient
+     * @param secretHash Hash of the secret for atomic swap
+     * @param timelock Timestamp until which the deposit is locked
+     */
+    function depositToNear(
+        string calldata nearRecipient,
+        bytes32 secretHash,
+        uint256 timelock
+    ) external payable {
+        require(msg.value > 0, "Resolver: amount must be greater than 0");
+        require(timelock > block.timestamp, "Resolver: invalid timelock");
+        
+        // Store the deposit information
+        bytes32 depositKey = keccak256(abi.encodePacked(block.chainid, nearRecipient));
+        nearDeposits[depositKey] = true;
+        
+        // Convert NEAR amount (1e24 yoctoNEAR = 1 NEAR)
+        uint128 nearAmount = uint128(msg.value / 1e10); // Convert wei to yoctoNEAR (1e24)
+        
+        // Emit event for the relayer to pick up
+        emit NearDepositInitiated(
+            msg.sender,
+            nearRecipient,
+            msg.value,
+            secretHash,
+            timelock
+        );
+        
+        // In a real implementation, this would interact with the NEAR bridge contract
+        // For now, we'll just emit an event and the relayer will handle the actual bridge interaction
+    }
+    
+    /**
+     * @notice Complete a withdrawal from NEAR bridge
+     * @param proofData Proof data from NEAR bridge
+     * @param blockHeaderLite NEAR block header lite
+     * @param blockProof Proof of block header
+     * @param recipient Ethereum address to receive the funds
+     * @param amount Amount to withdraw
+     */
+    function completeNearWithdrawal(
+        bytes calldata proofData,
+        bytes calldata blockHeaderLite,
+        bytes calldata blockProof,
+        address payable recipient,
+        uint256 amount
+    ) external onlyOwner {
+        // In a real implementation, this would verify the proof and withdraw from the bridge
+        // For now, we'll just transfer the funds to the recipient
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Resolver: transfer failed");
+    }
+    
+    /**
+     * @notice Refund a NEAR deposit
+     * @param nearRecipient Original NEAR recipient
+     * @param secretHash Hash of the secret used for the deposit
+     */
+    function refundNearDeposit(
+        string calldata nearRecipient,
+        bytes32 secretHash
+    ) external onlyOwner {
+        bytes32 depositKey = keccak256(abi.encodePacked(block.chainid, nearRecipient));
+        require(nearDeposits[depositKey], "Resolver: no active deposit");
+        
+        // Emit refund event
+        emit NearRefunded(
+            secretHash,
+            nearRecipient,
+            address(this).balance // In a real implementation, this would be the actual deposit amount
+        );
+        
+        // Clean up
+        delete nearDeposits[depositKey];
+    }
+
+    /**
      * @notice See {IResolverExample-deploySrc}.
      */
     function deploySrc(
@@ -95,6 +285,11 @@ contract Resolver is Ownable {
         TakerTraits takerTraits,
         bytes calldata args
     ) external payable onlyOwner {
+        // For NEAR integration, we need to handle deposits differently
+        if (immutables.chainId.get() == NEAR_CHAIN_ID) {
+            _handleNearDeposit(immutables, secret);
+            return;
+        }
 
         IBaseEscrow.Immutables memory immutablesMem = immutables;
         immutablesMem.timelocks = TimelocksLib.setDeployedAt(immutables.timelocks, block.timestamp);
@@ -126,7 +321,7 @@ contract Resolver is Ownable {
         escrow.withdraw(secret, immutables);
         
         // If this is a NEAR-related withdrawal, emit an event
-        if (nearDeposits[keccak256(abi.encodePacked(immutables.dstChainId, immutables.recipient))]) {
+if (nearDeposits[keccak256(abi.encodePacked(immutables.taker.get(), immutables.token.get()))]) {
             emit NearWithdrawalCompleted(
                 keccak256(abi.encodePacked(secret)),
                 string(abi.encodePacked(immutables.recipient)),
