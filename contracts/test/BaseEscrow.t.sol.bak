@@ -10,9 +10,11 @@ contract BaseEscrowTest is Test {
     
     // Mock contract that inherits from BaseEscrow
     contract MockEscrow is BaseEscrow {
+        using AddressLib for Address;
+        
         constructor(uint32 rescueDelay, IERC20 accessToken) 
             BaseEscrow(rescueDelay, accessToken) {}
-            
+        
         // Implement required abstract functions
         function isSrc() public pure override returns (bool) {
             return false;
@@ -22,10 +24,16 @@ contract BaseEscrowTest is Test {
             return true;
         }
         
-        function initialize(
-            IBaseEscrow.InitParams calldata params
-        ) public initializer {
+        function initialize(IBaseEscrow.InitParams calldata params) public initializer {
             __BaseEscrow_init(params);
+        }
+        
+        // Implement other required functions from BaseEscrow
+        function _validateImmutables(Immutables calldata immutables) internal pure override {
+            // Basic validation - can be expanded as needed
+            require(immutables.orderHash != bytes32(0), "Invalid order hash");
+            require(immutables.hashlock != bytes32(0), "Invalid hashlock");
+            require(immutables.amount > 0, "Invalid amount");
         }
     }
     
@@ -36,16 +44,14 @@ contract BaseEscrowTest is Test {
     
     // Test that the contract can be deployed
     function test_Deployment() public {
-        // Create mock immutables
-        IBaseEscrow.Immutables memory immutables = IBaseEscrow.Immutables({
-            escrowFactory: address(0x1234),
-            resolver: address(0x5678),
-            nativeToken: address(0x9abc),
-            chainId: 1
-        });
+        // Deploy a mock ERC20 token for testing
+        IERC20 mockToken = IERC20(address(0x1234));
         
-        // Deploy the mock contract
-        MockEscrow escrow = new MockEscrow(immutables);
+        // Deploy the mock contract with test parameters
+        MockEscrow escrow = new MockEscrow(
+            7 days,  // rescueDelay: 7 days
+            mockToken  // accessToken: mock ERC20 token
+        );
         
         // Verify the contract was deployed
         assertTrue(address(escrow) != address(0), "Contract deployment failed");

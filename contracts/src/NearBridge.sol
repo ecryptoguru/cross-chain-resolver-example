@@ -186,6 +186,7 @@ contract NearBridge is Ownable, ReentrancyGuard, EIP712 {
         require(_minDeposit <= _maxDeposit, "Invalid deposit limits");
         require(_bridgeFeeBps <= 10000, "Invalid fee basis points");
         
+        status = _initialStatus;
         config = BridgeConfig({
             feeCollector: _feeCollector,
             minDeposit: _minDeposit,
@@ -381,6 +382,7 @@ contract NearBridge is Ownable, ReentrancyGuard, EIP712 {
             require(relayerList.length >= requiredRelayerConfirmations, "Not enough relayers");
         }
         
+        status = newStatus;
         config.status = newStatus;
         emit BridgeStatusUpdated(newStatus);
     }
@@ -474,6 +476,7 @@ contract NearBridge is Ownable, ReentrancyGuard, EIP712 {
         uint256 timelock
     ) internal returns (bytes32 depositId) {
         require(bytes(nearRecipient).length > 0, "Invalid recipient");
+        require(timelock > block.timestamp, "Invalid timelock");
         
         // Calculate bridge fee
         uint256 fee = (amount * config.bridgeFeeBps) / 10000;
@@ -505,17 +508,17 @@ contract NearBridge is Ownable, ReentrancyGuard, EIP712 {
         
         require(deposits[depositId].depositor == address(0), "Deposit already exists");
         
-        // Store deposit data
+        // Store deposit data - use amountAfterFee since that's what the bridge actually holds
         deposits[depositId] = Deposit({
             token: token,
             depositor: msg.sender,
             nearRecipient: nearRecipient,
-            amount: amount,
+            amount: amountAfterFee,  // Store the amount after fees, which is what we can actually withdraw
             timestamp: block.timestamp,
             claimed: false,
             disputed: false,
             disputeEndTime: 0,
-            secretHash: keccak256(abi.encodePacked("default-secret")),
+            secretHash: secretHash,
             timelock: timelock
         });
         
