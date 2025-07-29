@@ -3,10 +3,10 @@ pragma solidity ^0.8.23;
 
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
-import "@openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin-contracts/contracts/access/AccessControl.sol";
-import "@openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin-contracts/contracts/utils/introspection/IERC165.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import "../src/adapters/TokenAdapter.sol";
 
 contract TestERC20 is ERC20 {

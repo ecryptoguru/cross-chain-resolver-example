@@ -5,8 +5,8 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "../src/NearBridge.sol";
 import "../src/adapters/TokenAdapter.sol";
-import "@openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 // Mock ERC20 token for testing
 contract MockToken is ERC20 {

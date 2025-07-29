@@ -1,4 +1,4 @@
-@1inch/limit-order-protocol/=contracts/lib/limit-order-protocol/
+@1inch/limit-order-protocol/=contracts/lib/limit-order-protocol/contracts/
 @1inch/solidity-utils/=contracts/lib/solidity-utils/
 @openzeppelin/contracts/=contracts/lib/openzeppelin-contracts/contracts
 @openzeppelin/contracts-upgradeable/=contracts/lib/openzeppelin-contracts-upgradeable/

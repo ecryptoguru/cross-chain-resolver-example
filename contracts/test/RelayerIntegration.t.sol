@@ -5,8 +5,8 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "../src/NearBridge.sol";
 import "../src/adapters/TokenAdapter.sol";
-import "@openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title Relayer Integration Tests
@@ -282,8 +282,8 @@ contract RelayerIntegrationTest is Test {
     
     function testRelayerRotation() public {
         // Remove old relayer and add new one
-        address newRelayer = address(0x888);
         uint256 newRelayerKey = 0x8888888888888888888888888888888888888888888888888888888888888888;
+        address newRelayer = vm.addr(newRelayerKey); // Derive address from private key
         
         bridge.removeRelayer(relayer1);
         bridge.addRelayer(newRelayer);
@@ -305,7 +305,7 @@ contract RelayerIntegrationTest is Test {
         bytes32 depositId = logs[2].topics[1];
         vm.stopPrank();
         
-        // Generate signatures with new relayer set
+        // Generate signatures with new relayer set (relayer2 + newRelayer)
         bytes[] memory signatures = new bytes[](2);
         uint256 expectedAmount = DEPOSIT_AMOUNT - ((DEPOSIT_AMOUNT * 30) / 10000);
         
@@ -336,7 +336,7 @@ contract RelayerIntegrationTest is Test {
                 address(testToken),
                 DEPOSIT_AMOUNT,
                 NEAR_ACCOUNT,
-                keccak256(abi.encodePacked("stress-test", i)),
+                keccak256(abi.encodePacked("stress-test", vm.toString(i))),
                 block.timestamp + 1 days
             );
             

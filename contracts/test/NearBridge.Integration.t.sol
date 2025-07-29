@@ -5,8 +5,8 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "../src/NearBridge.sol";
 import "../src/adapters/TokenAdapter.sol";
-import "@openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title NearBridge Integration Tests
@@ -20,7 +20,7 @@ contract NearBridgeIntegrationTest is Test {
     TokenAdapter public adapter;
     
     // Real token addresses on Ethereum mainnet
-    address constant USDC = 0xA0b86a33E6441d1F6f0b8c2c5e8b8B8b8B8b8B8b; // USDC on mainnet
+    address constant USDC = 0xa0B86a33E6441d1F6f0b8c2c5e8b8B8B8b8B8b8B; // USDC on mainnet
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2; // WETH on mainnet
     address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;  // DAI on mainnet
     
