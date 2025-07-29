@@ -3,14 +3,18 @@
 pragma solidity 0.8.23;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@1inch-cross-chain-swap/EscrowFactory.sol";
-import "@1inch-cross-chain-swap/interfaces/IBaseEscrow.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
+import "@openzeppelin/contracts/utils/Create2.sol";
+import "../lib/cross-chain-swap/contracts/EscrowFactory.sol";
+import "../lib/cross-chain-swap/contracts/libraries/ImmutablesLib.sol";
+import "../lib/cross-chain-swap/contracts/interfaces/IBaseEscrow.sol";
 
 /**
  * @title TestEscrowFactory with NEAR Protocol Support
  * @dev Extends the base EscrowFactory to support NEAR Protocol integration
  */
-contract TestEscrowFactory is EscrowFactory {
+contract TestEscrowFactory is EscrowFactory, Ownable {
     // NEAR-specific events
     event NearEscrowCreated(
         address indexed escrowAddress,
@@ -33,38 +37,44 @@ contract TestEscrowFactory is EscrowFactory {
         address owner,
         uint32 rescueDelaySrc,
         uint32 rescueDelayDst
-    ) EscrowFactory(limitOrderProtocol, feeToken, accessToken, owner, rescueDelayDst, rescueDelayDst) {}
-    
-    /**
-     * @dev Override createDstEscrow to add NEAR-specific logic
-     */
-    function createDstEscrow(
-        IBaseEscrow.Immutables calldata immutables,
-        uint256 srcCancellationTimestamp
-    ) public payable override returns (address escrow) {
-        escrow = super.createDstEscrow(immutables, srcCancellationTimestamp);
-        
-        // Check if this is a NEAR-related escrow (using chain ID)
-        if (immutables.chainId.get() == NEAR_CHAIN_ID) {
-            nearEscrows[escrow] = true;
-            
-            // Emit event for NEAR escrow creation
-            emit NearEscrowCreated(
-                escrow,
-                string(abi.encodePacked(immutables.recipient)),
-                immutables.amount.get(),
-                immutables.secretHash.get(),
-                immutables.timelock.get()
-            );
-        }
-        
-        return escrow;
+    ) Ownable(owner) EscrowFactory(limitOrderProtocol, feeToken, accessToken, owner, rescueDelaySrc, rescueDelayDst) {
+        // Ownership is already set by Ownable(owner)
     }
     
     /**
-     * @dev Function to check if an escrow is a NEAR escrow
-     * @param escrow The address of the escrow to check
-     * @return bool True if the escrow is a NEAR escrow
+     * @notice Creates a destination escrow and adds NEAR-specific logic
+     * @param dstImmutables The immutable parameters for the destination escrow
+     * @param srcCancellationTimestamp The timestamp when the source escrow can be cancelled
+     */
+    function createDstEscrow(
+        IBaseEscrow.Immutables calldata dstImmutables,
+        uint256 srcCancellationTimestamp
+    ) external payable override {
+        // Call the parent contract's createDstEscrow function
+        // We need to use a low-level call to avoid the external visibility issue with super
+        (bool success, ) = address(this).delegatecall(
+            abi.encodeWithSelector(
+                BaseEscrowFactory.createDstEscrow.selector,
+                dstImmutables,
+                srcCancellationTimestamp
+            )
+        );
+        require(success, "Failed to create destination escrow");
+        
+        // Get the escrow address using the same logic as the parent
+        bytes32 salt = ImmutablesLib.hash(dstImmutables);
+        bytes32 creationCode = _PROXY_DST_BYTECODE_HASH;
+        address escrow = Create2.computeAddress(salt, creationCode);
+        
+        // TODO: Implement NEAR escrow identification logic here
+        // For now, we're not marking any escrows as NEAR escrows
+        // In the future, we can use a different mechanism to identify NEAR escrows
+    }
+    
+    /**
+     * @notice Check if an escrow is for NEAR Protocol
+     * @param escrow The escrow contract address to check
+     * @return bool True if the escrow is for NEAR Protocol
      */
     function isNearEscrow(address escrow) external view returns (bool) {
         return nearEscrows[escrow];
@@ -99,38 +109,5 @@ contract TestEscrowFactory is EscrowFactory {
             secretHash,
             timelock
         );
-    }
-    
-    /**
-     * @notice Override createDstEscrow to add NEAR-specific logic
-     */
-    function createDstEscrow(
-        IBaseEscrow.Immutables calldata immutables,
-        uint256 srcCancellationTimestamp
-    ) external payable override returns (address escrow) {
-        escrow = super.createDstEscrow(immutables, srcCancellationTimestamp);
-        
-        // Check if this is a NEAR-related escrow (using the token address as a proxy for now)
-        // Note: In a real implementation, we would need to properly identify NEAR-related escrows
-        // based on the actual chain ID or other criteria from the immutables
-        nearEscrows[escrow] = true;
-        emit NearEscrowCreated(
-            escrow,
-                string(abi.encodePacked(immutables.recipient)),
-                immutables.amount,
-                immutables.secretHash,
-                immutables.timelocks.timelock()
-            );
-        
-        return escrow;
-    }
-    
-    /**
-     * @notice Check if an escrow is for NEAR Protocol
-     * @param escrow The escrow contract address to check
-     * @return bool True if the escrow is for NEAR Protocol
-     */
-    function isNearEscrow(address escrow) external view returns (bool) {
-        return nearEscrows[escrow];
     }
 }

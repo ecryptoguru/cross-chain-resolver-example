@@ -143,37 +143,12 @@ contract TokenAdapter is IAdapter, ReentrancyGuard, AccessControl {
     
     /**
      * @inheritdoc IAdapter
-     * @dev Checks if a token is supported by this adapter
-     * @param token The address of the token to check
-     * @return bool True if the token is supported, false otherwise
-     */
-    function supportsToken(address token) external view override returns (bool) {
-        return tokenInfo[token].tokenAddress != address(0);
-    }
-
-    /**
-     * @inheritdoc IAdapter
      */
     function getBalance(address token, address account) external view override returns (uint256) {
         if (token == address(0)) {
             return account.balance;
         }
         return IERC20(token).balanceOf(account);
-    }
-
-    /**
-     * @dev Get token information including its address and decimals
-     * @param token The address of the token
-     * @return tokenAddress The address of the token
-     * @return decimals The number of decimals the token uses
-     * @custom:reverts if token is not registered
-     */
-    function getTokenInfo(address token) external view override returns (address, uint8) {
-        TokenInfo memory info = tokenInfo[token];
-        if (info.tokenAddress == address(0)) {
-            revert TokenNotRegistered();
-        }
-        return (info.tokenAddress, info.decimals);
     }
     
     /**
@@ -182,60 +157,31 @@ contract TokenAdapter is IAdapter, ReentrancyGuard, AccessControl {
      * @param from The address to transfer from
      * @param to The address to transfer to
      * @param amount The amount to transfer
-     * @return bool True if the transfer was successful, false otherwise
      * @custom:emits TokensTransferred when tokens are successfully transferred
      * @custom:reverts if token is not registered
      * @custom:reverts if transfer fails
      */
-    function transfer(
+    function safeTransfer(
         address token,
         address from,
         address to,
         uint256 amount
-    ) external onlyRole(REGISTRAR_ROLE) nonReentrant returns (bool) {
+    ) external override nonReentrant {
         if (token == address(0)) revert ZeroAddress();
-        if (tokenInfo[token].tokenAddress == address(0)) revert TokenNotRegistered();
         if (from == address(0) || to == address(0)) revert ZeroAddress();
-        if (amount == 0) return true;
-        
-        bool success;
+        if (amount == 0) return;
         
         if (token == address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE)) {
             // Handle native ETH transfer
-            (success, ) = to.call{value: amount}("");
+            (bool success, ) = to.call{value: amount}("");
             if (!success) revert TransferFailed();
         } else {
             // Handle ERC20 token transfer
             IERC20 tokenContract = IERC20(token);
             tokenContract.safeTransferFrom(from, to, amount);
-            success = true;
         }
         
-        if (success) {
-            emit TokensTransferred(token, from, to, amount);
-        }
-        
-        return success;
-    }
-    
-    /**
-     * @dev Get the balance of a token for an account
-     * @param token The address of the token
-     * @param account The address of the account
-     * @return uint256 The token balance of the account
-     */
-    function getBalance(
-        address token,
-        address account
-    ) external view returns (uint256) {
-        if (token == address(0)) revert ZeroAddress();
-        if (account == address(0)) revert ZeroAddress();
-        
-        if (token == address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE)) {
-            return account.balance;
-        } else {
-            return IERC20(token).balanceOf(account);
-        }
+        emit TokensTransferred(token, from, to, amount);
     }
     
     /**

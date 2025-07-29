@@ -45,13 +45,15 @@ contract FeeHandler is Ownable {
      * @param _defaultBaseFee Default base fee in basis points (1 = 0.01%)
      * @param _defaultMinFee Default minimum fee amount
      * @param _defaultMaxFee Default maximum fee amount
+     * @param initialOwner The address that will be the initial owner
      */
     constructor(
         address _defaultFeeRecipient,
         uint256 _defaultBaseFee,
         uint256 _defaultMinFee,
-        uint256 _defaultMaxFee
-    ) {
+        uint256 _defaultMaxFee,
+        address initialOwner
+    ) Ownable(initialOwner) {
         require(_defaultFeeRecipient != address(0), "FeeHandler: Invalid fee recipient");
         
         defaultFeeConfig = FeeConfig({

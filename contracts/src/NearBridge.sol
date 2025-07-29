@@ -98,14 +98,16 @@ contract NearBridge is Ownable, ReentrancyGuard {
      * @param _maxDeposit Maximum deposit amount
      * @param _disputePeriod Dispute period in seconds
      * @param _bridgeFeeBps Bridge fee in basis points (1/10000)
+     * @param initialOwner Initial owner of the contract
      */
     constructor(
         address _feeCollector,
         uint256 _minDeposit,
         uint256 _maxDeposit,
         uint256 _disputePeriod,
-        uint256 _bridgeFeeBps
-    ) {
+        uint256 _bridgeFeeBps,
+        address initialOwner
+    ) Ownable(initialOwner) {
         require(_feeCollector != address(0), "Invalid fee collector");
         require(_minDeposit < _maxDeposit, "Invalid deposit limits");
         require(_bridgeFeeBps < 10000, "Invalid fee");

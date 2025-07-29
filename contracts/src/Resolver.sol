@@ -5,15 +5,15 @@ pragma solidity 0.8.23;
 import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
-import {IOrderMixin} from "limit-order-protocol/contracts/interfaces/IOrderMixin.sol";
-import {TakerTraits} from "limit-order-protocol/contracts/libraries/TakerTraitsLib.sol";
+import {IOrderMixin} from "../lib/limit-order-protocol/contracts/interfaces/IOrderMixin.sol";
+import {TakerTraits} from "../lib/limit-order-protocol/contracts/libraries/TakerTraitsLib.sol";
 
 import {IResolverExample} from "../lib/cross-chain-swap/contracts/interfaces/IResolverExample.sol";
 import {RevertReasonForwarder} from "../lib/cross-chain-swap/lib/solidity-utils/contracts/libraries/RevertReasonForwarder.sol";
 import {IEscrowFactory} from "../lib/cross-chain-swap/contracts/interfaces/IEscrowFactory.sol";
 import {IBaseEscrow} from "../lib/cross-chain-swap/contracts/interfaces/IBaseEscrow.sol";
 import {TimelocksLib, Timelocks} from "../lib/cross-chain-swap/contracts/libraries/TimelocksLib.sol";
-import {Address} from "solidity-utils/contracts/libraries/AddressLib.sol";
+import {Address, AddressLib} from "../lib/solidity-utils/contracts/libraries/AddressLib.sol";
 import {IEscrow} from "../lib/cross-chain-swap/contracts/interfaces/IEscrow.sol";
 import {ImmutablesLib} from "../lib/cross-chain-swap/contracts/libraries/ImmutablesLib.sol";
 
@@ -39,7 +39,7 @@ interface INearToken {
  *
  * @custom:security-contact security@1inch.io
  */
-contract Resolver is Ownable {
+contract Resolver is IResolverExample, Ownable {
     // Events for NEAR integration
     event NearDepositInitiated(
         address indexed sender,
@@ -47,12 +47,6 @@ contract Resolver is Ownable {
         uint256 amount,
         bytes32 secretHash,
         uint256 timelock
-    );
-    
-    event NearWithdrawalCompleted(
-        bytes32 indexed secretHash,
-        string nearRecipient,
-        uint256 amount
     );
     
     // Constants for NEAR integration
@@ -93,27 +87,32 @@ contract Resolver is Ownable {
         IBaseEscrow.Immutables memory immutables,
         bytes32 secret
     ) internal {
-        // Verify the deposit amount meets minimum requirements
-        require(immutables.amount.get() >= MIN_NEAR_DEPOSIT, "Deposit amount too low");
+        // Get the actual values from the immutables
+        address taker = AddressLib.get(immutables.taker);
+        uint256 amount = immutables.amount;
         
-        // Generate secret hash from the provided secret
+        // Verify the deposit amount meets minimum requirements
+        require(amount >= MIN_NEAR_DEPOSIT, "Deposit amount too low");
+        
+        // Generate a unique key for this deposit
         bytes32 secretHash = keccak256(abi.encodePacked(secret));
         
         // Store the NEAR deposit details
-        nearDeposits[secretHash] = NearDeposit({
-            sender: immutables.taker.get(),
-            nearRecipient: string(abi.encodePacked(immutables.recipient)),
-            amount: immutables.amount.get(),
+        NearDeposit memory newDeposit = NearDeposit({
+            sender: taker,
+            nearRecipient: string(abi.encodePacked(taker)),
+            amount: amount,
             secretHash: secretHash,
             timelock: block.timestamp + 24 hours, // 24-hour timelock
             withdrawn: false
         });
+        nearDeposits[secretHash] = newDeposit;
         
         // Emit event for off-chain services to pick up
         emit NearDepositInitiated(
-            immutables.taker.get(),
-            string(abi.encodePacked(immutables.recipient)),
-            immutables.amount.get(),
+            taker,
+            string(abi.encodePacked(taker)), // Using taker as recipient for NEAR
+            amount,
             secretHash,
             block.timestamp + 24 hours
         );
@@ -176,14 +175,9 @@ contract Resolver is Ownable {
     // Constants for NEAR integration
     address public constant NEAR_BRIDGE = 0x3fEFc5a022BF1f57d3d1FDd5Cc20C42e467e4bEe; // Fixed checksum address
     string public constant NEAR_TOKEN_CONTRACT = "wrap.near"; // NEAR token contract on NEAR
-    
-    // Mapping to track NEAR deposits
-    mapping(bytes32 => bool) public nearDeposits;
     using ImmutablesLib for IBaseEscrow.Immutables;
     using TimelocksLib for Timelocks;
 
-    error InvalidLength();
-    error LengthMismatch();
 
     IEscrowFactory private immutable _FACTORY;
     IOrderMixin private immutable _LOP;
@@ -211,7 +205,16 @@ contract Resolver is Ownable {
         
         // Store the deposit information
         bytes32 depositKey = keccak256(abi.encodePacked(block.chainid, nearRecipient));
-        nearDeposits[depositKey] = true;
+        // Create a new NearDeposit struct
+        NearDeposit memory newDeposit = NearDeposit({
+            sender: msg.sender,  // The caller is the taker
+            nearRecipient: nearRecipient,  // The NEAR recipient address
+            amount: msg.value,  // The amount being deposited
+            secretHash: bytes32(0),  // Will be set when the secret is revealed
+            timelock: block.timestamp + 24 hours,  // 24-hour timelock
+            withdrawn: false
+        });
+        nearDeposits[depositKey] = newDeposit;
         
         // Convert NEAR amount (1e24 yoctoNEAR = 1 NEAR)
         uint128 nearAmount = uint128(msg.value / 1e10); // Convert wei to yoctoNEAR (1e24)
@@ -260,7 +263,7 @@ contract Resolver is Ownable {
         bytes32 secretHash
     ) external onlyOwner {
         bytes32 depositKey = keccak256(abi.encodePacked(block.chainid, nearRecipient));
-        require(nearDeposits[depositKey], "Resolver: no active deposit");
+        require(nearDeposits[depositKey].sender != address(0), "Resolver: no active deposit");
         
         // Emit refund event
         emit NearRefunded(
@@ -284,10 +287,14 @@ contract Resolver is Ownable {
         uint256 amount,
         TakerTraits takerTraits,
         bytes calldata args
-    ) external payable onlyOwner {
+    ) external override onlyOwner {
         // For NEAR integration, we need to handle deposits differently
-        if (immutables.chainId.get() == NEAR_CHAIN_ID) {
-            _handleNearDeposit(immutables, secret);
+        // Since chainId is not directly available in immutables, we'll use a different approach
+        // to identify NEAR chain transactions. For now, we'll use a flag in the args parameter.
+        if (args.length > 0 && args[0] == 0x01) {  // First byte of args is 0x01 for NEAR
+            // Generate a new secret using keccak256 of the current block timestamp and the sender's address
+            bytes32 newSecret = keccak256(abi.encodePacked(block.timestamp, msg.sender));
+            _handleNearDeposit(immutables, newSecret);
             return;
         }
 
@@ -307,7 +314,10 @@ contract Resolver is Ownable {
     /**
      * @notice See {IResolverExample-deployDst}.
      */
-    function deployDst(IBaseEscrow.Immutables calldata dstImmutables, uint256 srcCancellationTimestamp) external onlyOwner payable {
+    function deployDst(
+        IBaseEscrow.Immutables calldata dstImmutables, 
+        uint256 srcCancellationTimestamp
+    ) external payable override onlyOwner {
         _FACTORY.createDstEscrow{value: msg.value}(dstImmutables, srcCancellationTimestamp);
     }
 
@@ -321,15 +331,20 @@ contract Resolver is Ownable {
         escrow.withdraw(secret, immutables);
         
         // If this is a NEAR-related withdrawal, emit an event
-if (nearDeposits[keccak256(abi.encodePacked(immutables.taker.get(), immutables.token.get()))]) {
+        address taker = AddressLib.get(immutables.taker);
+        address token = AddressLib.get(immutables.token);
+        bytes32 depositKey = keccak256(abi.encodePacked(taker, token));
+            
+        NearDeposit storage deposit = nearDeposits[depositKey];
+        if (deposit.sender != address(0)) {
             emit NearWithdrawalCompleted(
                 keccak256(abi.encodePacked(secret)),
-                string(abi.encodePacked(immutables.recipient)),
-                immutables.amount
+                deposit.nearRecipient,
+                deposit.amount
             );
             
             // Clean up
-            delete nearDeposits[keccak256(abi.encodePacked(immutables.dstChainId, immutables.recipient))];
+            delete nearDeposits[depositKey];
         }
     }
 
@@ -343,12 +358,19 @@ if (nearDeposits[keccak256(abi.encodePacked(immutables.taker.get(), immutables.t
         escrow.cancel(immutables);
         
         // If this is a NEAR-related escrow, emit refund event
-        bytes32 depositKey = keccak256(abi.encodePacked(immutables.dstChainId, immutables.recipient));
-        if (nearDeposits[depositKey]) {
+        // Create a deposit key using the taker and token addresses
+        address taker = AddressLib.get(immutables.taker);
+        address token = AddressLib.get(immutables.token);
+        bytes32 depositKey = keccak256(abi.encodePacked(taker, token));
+            
+        // Check if deposit exists
+        if (nearDeposits[depositKey].sender != address(0)) {
+            // Get the deposit details from storage
+            NearDeposit storage deposit = nearDeposits[depositKey];
             emit NearRefunded(
                 depositKey,
-                string(abi.encodePacked(immutables.recipient)),
-                immutables.amount
+                deposit.nearRecipient,
+                deposit.amount
             );
             
             // Clean up
@@ -359,7 +381,7 @@ if (nearDeposits[keccak256(abi.encodePacked(immutables.taker.get(), immutables.t
     /**
      * @notice See {IResolverExample-arbitraryCalls}.
      */
-    function arbitraryCalls(address[] calldata targets, bytes[] calldata arguments) external onlyOwner {
+    function arbitraryCalls(address[] calldata targets, bytes[] calldata arguments) external override onlyOwner {
         uint256 length = targets.length;
         if (targets.length != arguments.length) revert LengthMismatch();
         for (uint256 i = 0; i < length; ++i) {

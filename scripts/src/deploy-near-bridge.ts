@@ -17,6 +17,8 @@ const NEAR_BRIDGE_ABI = JSON.parse(
 // Deployment parameters
 const MIN_DEPOSIT = ethers.parseEther('0.01'); // 0.01 ETH
 const MAX_DEPOSIT = ethers.parseEther('100');  // 100 ETH
+const DISPUTE_PERIOD = 7 * 24 * 60 * 60; // 7 days in seconds
+const BRIDGE_FEE_BPS = 10; // 0.1% bridge fee (10 basis points)
 
 async function main() {
   console.log('Starting NearBridge deployment...');
@@ -39,9 +41,17 @@ async function main() {
   );
   
   // Deploy the contract
+  // Get the deployer's address to use as the initial owner
+  const deployerAddress = await signer.getAddress();
+  
+  // Deploy the contract with all required parameters
   const nearBridge = await NearBridgeFactory.deploy(
-    MIN_DEPOSIT,
-    MAX_DEPOSIT,
+    deployerAddress, // feeCollector
+    MIN_DEPOSIT,     // minDeposit
+    MAX_DEPOSIT,     // maxDeposit
+    DISPUTE_PERIOD,  // disputePeriod
+    BRIDGE_FEE_BPS,  // bridgeFeeBps
+    deployerAddress, // initialOwner
     { gasLimit: 5_000_000 } // Adjust gas limit as needed
   );
   
