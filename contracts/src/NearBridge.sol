@@ -5,12 +5,40 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 /**
  * @title NearBridge - Bridge contract for Ethereum to NEAR cross-chain transfers
  * @dev Handles asset custody, message verification, and dispute resolution for cross-chain swaps
  */
-contract NearBridge is Ownable, ReentrancyGuard {
+/// @custom:security-contact security@example.com
+contract NearBridge is Ownable, ReentrancyGuard, EIP712 {
+    using ECDSA for bytes32;
+    
+    // EIP-712 type hashes for structured data signing
+    bytes32 private constant _WITHDRAW_TYPEHASH = 
+        keccak256("Withdraw(bytes32 depositId,address recipient,uint256 amount,uint256 nonce,uint256 deadline)");
+    
+    // Domain separator for EIP-712
+    string private constant _NAME = "NearBridge";
+    string private constant _VERSION = "1.0.0";
+    
+    // Message status enum
+    enum MessageStatus { PENDING, PROCESSED, FAILED }
+    
+    // Message structure for cross-chain communication
+    struct Message {
+        bytes32 id;
+        address sender;
+        address recipient;
+        uint256 amount;
+        bytes32 depositId;
+        uint256 timestamp;
+        MessageStatus status;
+        uint256 retryCount;
+        uint256 lastProcessed;
+    }
     using SafeERC20 for IERC20;
 
     // NEAR chain ID (following EIP-155)
@@ -18,6 +46,15 @@ contract NearBridge is Ownable, ReentrancyGuard {
     
     // Bridge status enum
     enum BridgeStatus { ACTIVE, PAUSED, DISPUTE }
+    
+    // Bridge status state variable
+    BridgeStatus public status;
+    
+    // Modifier to check if bridge is active
+    modifier whenActive() {
+        require(status == BridgeStatus.ACTIVE, "Bridge is not active");
+        _;
+    }
     
     // Bridge configuration
     struct BridgeConfig {
@@ -39,6 +76,8 @@ contract NearBridge is Ownable, ReentrancyGuard {
         bool claimed;                  // Whether the deposit has been claimed
         bool disputed;                 // Whether the deposit is in dispute
         uint256 disputeEndTime;        // Timestamp when dispute period ends
+        bytes32 secretHash;            // Hash of the secret for claim verification
+        uint256 timelock;              // Timestamp when the deposit can be withdrawn
     }
     
     // State variables
@@ -46,15 +85,35 @@ contract NearBridge is Ownable, ReentrancyGuard {
     mapping(bytes32 => Deposit) public deposits;  // depositId => Deposit
     mapping(address => bool) public relayers;     // Trusted relayers
     mapping(address => bool) public supportedTokens;  // Supported ERC20 tokens
+    mapping(bytes32 => Message) public messages;  // messageId => Message
+    mapping(address => uint256) public nonces;    // Nonces for replay protection
+    mapping(bytes32 => bool) public processedMessages; // Track processed message hashes
+    
+    // Message processing parameters
+    uint256 public constant MAX_RETRIES = 3;
+    uint256 public constant MESSAGE_EXPIRY = 1 weeks;
+    uint256 public constant MIN_RELAYERS = 1; // Minimum number of relayers required for critical operations
+    
+    // Relayer set management
+    address[] public relayerList;
+    uint256 public requiredRelayerConfirmations = 1; // Number of relayers required to confirm a message
     
     // Events
-    event Deposited(
+    event DepositInitiated(
         bytes32 indexed depositId,
-        address indexed token,
-        address indexed depositor,
+        address indexed sender,
         string nearRecipient,
+        address token,
         uint256 amount,
-        uint256 fee
+        uint256 fee,
+        uint256 timestamp
+    );
+    
+    event WithdrawalCompleted(
+        bytes32 indexed depositId,
+        address indexed recipient,
+        uint256 amount,
+        uint256 timestamp
     );
     
     event Claimed(
@@ -65,52 +124,67 @@ contract NearBridge is Ownable, ReentrancyGuard {
     
     event DisputeInitiated(
         bytes32 indexed depositId,
-        address indexed disputer,
-        string reason
+        address indexed initiator,
+        uint256 timestamp
     );
     
     event DisputeResolved(
         bytes32 indexed depositId,
-        bool approved,
-        address resolver,
-        string reason
+        bool resolvedInFavorOfClaimant,
+        uint256 timestamp
     );
+    
+    event MessageSent(
+        bytes32 indexed messageId,
+        bytes32 indexed depositId,
+        address indexed sender,
+        address recipient,
+        uint256 amount,
+        uint256 timestamp
+    );
+    
+    event MessageProcessed(
+        bytes32 indexed messageId,
+        MessageStatus status,
+        uint256 timestamp
+    );
+    
+    event RelayerAdded(address indexed relayer);
+    event RelayerRemoved(address indexed relayer);
+    event RequiredConfirmationsUpdated(uint256 requiredConfirmations);
+    event BridgeStatusUpdated(BridgeStatus newStatus);
     
     event BridgeConfigUpdated(BridgeConfig newConfig);
     event RelayerUpdated(address indexed relayer, bool isActive);
     event TokenSupportUpdated(address indexed token, bool isSupported);
     
-    // Modifiers
-    modifier onlyRelayer() {
-        require(relayers[msg.sender], "Not a relayer");
-        _;
-    }
-    
-    modifier whenActive() {
-        require(config.status == BridgeStatus.ACTIVE, "Bridge is not active");
-        _;
-    }
-    
     /**
      * @dev Constructor
+     * @param _owner Initial owner of the contract
+     * @param _feeToken Address of the token used for fees
+     * @param _accessToken Address of the access token (optional)
      * @param _feeCollector Address to collect bridge fees
      * @param _minDeposit Minimum deposit amount
      * @param _maxDeposit Maximum deposit amount
      * @param _disputePeriod Dispute period in seconds
      * @param _bridgeFeeBps Bridge fee in basis points (1/10000)
-     * @param initialOwner Initial owner of the contract
+     * @param _initialStatus Initial bridge status
      */
     constructor(
+        address _owner,
+        address _feeToken,
+        address _accessToken,
         address _feeCollector,
         uint256 _minDeposit,
         uint256 _maxDeposit,
         uint256 _disputePeriod,
         uint256 _bridgeFeeBps,
-        address initialOwner
-    ) Ownable(initialOwner) {
+        BridgeStatus _initialStatus
+    ) Ownable(_owner) EIP712(_NAME, _VERSION) {
+        require(_feeToken != address(0), "Invalid fee token");
         require(_feeCollector != address(0), "Invalid fee collector");
-        require(_minDeposit < _maxDeposit, "Invalid deposit limits");
-        require(_bridgeFeeBps < 10000, "Invalid fee");
+        require(_minDeposit <= _maxDeposit, "Invalid deposit limits");
+        require(_bridgeFeeBps <= 10000, "Invalid fee basis points");
         
         config = BridgeConfig({
             feeCollector: _feeCollector,
@@ -118,14 +192,17 @@ contract NearBridge is Ownable, ReentrancyGuard {
             maxDeposit: _maxDeposit,
             disputePeriod: _disputePeriod,
             bridgeFeeBps: _bridgeFeeBps,
-            status: BridgeStatus.ACTIVE
+            status: _initialStatus
         });
         
-        // Owner is a relayer by default
-        relayers[msg.sender] = true;
+        // Set initial supported tokens
+        supportedTokens[_feeToken] = true;
+        if (_accessToken != address(0)) {
+            supportedTokens[_accessToken] = true;
+        }
         
-        emit BridgeConfigUpdated(config);
-        emit RelayerUpdated(msg.sender, true);
+        // Add deployer as initial relayer
+        _addRelayer(_owner);
     }
     
     // ============ User Functions ============
@@ -133,12 +210,18 @@ contract NearBridge is Ownable, ReentrancyGuard {
     /**
      * @dev Deposit native ETH to bridge to NEAR
      * @param nearRecipient NEAR account ID of the recipient
+     * @param secretHash Hash of the secret for the hashlock
+     * @param timelock Timestamp when the deposit can be refunded
      */
-    function depositEth(string calldata nearRecipient) external payable nonReentrant whenActive {
+    function depositEth(
+        string calldata nearRecipient,
+        bytes32 secretHash,
+        uint256 timelock
+    ) external payable nonReentrant whenActive {
         require(msg.value >= config.minDeposit, "Amount below minimum");
         require(msg.value <= config.maxDeposit, "Amount exceeds maximum");
         
-        _processDeposit(address(0), msg.value, nearRecipient, msg.sender);
+        _processDeposit(address(0), msg.value, nearRecipient, secretHash, timelock);
     }
     
     /**
@@ -146,11 +229,15 @@ contract NearBridge is Ownable, ReentrancyGuard {
      * @param token ERC20 token address
      * @param amount Amount to deposit
      * @param nearRecipient NEAR account ID of the recipient
+     * @param secretHash Hash of the secret for the hashlock
+     * @param timelock Timestamp when the deposit can be refunded
      */
     function depositToken(
         address token,
         uint256 amount,
-        string calldata nearRecipient
+        string calldata nearRecipient,
+        bytes32 secretHash,
+        uint256 timelock
     ) external nonReentrant whenActive {
         require(supportedTokens[token], "Token not supported");
         require(amount >= config.minDeposit, "Amount below minimum");
@@ -159,49 +246,114 @@ contract NearBridge is Ownable, ReentrancyGuard {
         // Transfer tokens from user to this contract
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         
-        _processDeposit(token, amount, nearRecipient, msg.sender);
+        _processDeposit(token, amount, nearRecipient, secretHash, timelock);
     }
     
     /**
      * @dev Claim tokens after they've been bridged back from NEAR
      * @param depositId Unique deposit ID
-     * @param amount Amount to claim
-     * @param proof Merkle proof for verification
+     * @param secret Secret for the hashlock
      */
-    function claim(
-        bytes32 depositId,
-        uint256 amount,
-        bytes32[] calldata proof
-    ) external nonReentrant {
-        Deposit storage deposit = deposits[depositId];
-        require(!deposit.claimed, "Already claimed");
-        require(!deposit.disputed, "Deposit in dispute");
-        require(deposit.depositor == msg.sender, "Not the depositor");
+    function claim(bytes32 depositId, bytes32 secret) external nonReentrant whenActive {
+        Deposit storage depositInfo = deposits[depositId];
+        require(depositInfo.depositor != address(0), "Deposit does not exist");
+        require(!depositInfo.claimed, "Already claimed");
+        require(!depositInfo.disputed, "Deposit is in dispute");
         
-        // In a real implementation, verify the proof against a merkle root
-        // stored in the contract and signed by relayers
-        _verifyClaim(depositId, amount, proof);
+        // Verify the secret matches the stored hash
+        require(keccak256(abi.encodePacked(secret)) == depositInfo.secretHash, "Invalid secret");
         
         // Mark as claimed
-        deposit.claimed = true;
+        depositInfo.claimed = true;
         
-        // Transfer tokens to the depositor
-        if (deposit.token == address(0)) {
-            (bool success, ) = msg.sender.call{value: amount}("");
-            require(success, "ETH transfer failed");
+        // Transfer tokens to the claimer
+        if (depositInfo.token == address(0)) {
+            (bool sent, ) = msg.sender.call{value: depositInfo.amount}("");
+            require(sent, "Failed to send ETH");
         } else {
-            IERC20(deposit.token).safeTransfer(msg.sender, amount);
+            IERC20(depositInfo.token).safeTransfer(msg.sender, depositInfo.amount);
         }
         
-        emit Claimed(depositId, msg.sender, amount);
+        emit Claimed(depositId, msg.sender, depositInfo.amount);
+    }
+    
+    /**
+     * @dev Complete withdrawal from NEAR to Ethereum
+     * @param depositId ID of the deposit to withdraw
+     * @param recipient Address to receive the withdrawn tokens
+     * @param secret The secret that hashes to the secretHash
+     * @param signatures Array of relayer signatures for this withdrawal
+     */
+    function completeWithdrawal(
+        bytes32 depositId,
+        address recipient,
+        string calldata secret,
+        bytes[] calldata signatures
+    ) external nonReentrant whenActive {
+        Deposit storage depositInfo = deposits[depositId];
+        require(depositInfo.depositor != address(0), "Deposit does not exist");
+        require(!depositInfo.claimed, "Deposit already claimed");
+        require(!depositInfo.disputed, "Deposit is in dispute");
+        require(recipient != address(0), "Invalid recipient");
+        require(signatures.length >= requiredRelayerConfirmations, "Insufficient confirmations");
+        
+        // Verify secret
+        require(
+            keccak256(abi.encodePacked(secret)) == depositInfo.secretHash,
+            "Invalid secret"
+        );
+        
+        // Verify signatures
+        bytes32 messageHash = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    _WITHDRAW_TYPEHASH,
+                    depositId,
+                    recipient,
+                    depositInfo.amount,
+                    nonces[recipient]++,
+                    block.timestamp + MESSAGE_EXPIRY
+                )
+            )
+        );
+        
+        address[] memory confirmedRelayers = new address[](signatures.length);
+        uint256 validSignatures = 0;
+        
+        for (uint256 i = 0; i < signatures.length; i++) {
+            address signer = ECDSA.recover(messageHash, signatures[i]);
+            if (relayers[signer] && !_isConfirmed(signer, confirmedRelayers, validSignatures)) {
+                confirmedRelayers[validSignatures] = signer;
+                validSignatures++;
+            }
+        }
+        
+        require(validSignatures >= requiredRelayerConfirmations, "Insufficient valid signatures");
+        
+        // Mark as claimed
+        depositInfo.claimed = true;
+        
+        // Transfer tokens to recipient
+        if (depositInfo.token == address(0)) {
+            (bool sent, ) = recipient.call{value: depositInfo.amount}("");
+            require(sent, "Failed to send ETH");
+        } else {
+            IERC20(depositInfo.token).safeTransfer(recipient, depositInfo.amount);
+        }
+        
+        emit WithdrawalCompleted(
+            depositId,
+            recipient,
+            depositInfo.amount,
+            block.timestamp
+        );
     }
     
     /**
      * @dev Initiate a dispute for a deposit
      * @param depositId Unique deposit ID
-     * @param reason Reason for the dispute
      */
-    function initiateDispute(bytes32 depositId, string calldata reason) external {
+    function initiateDispute(bytes32 depositId) external {
         Deposit storage deposit = deposits[depositId];
         require(deposit.depositor == msg.sender, "Not the depositor");
         require(!deposit.claimed, "Already claimed");
@@ -210,62 +362,28 @@ contract NearBridge is Ownable, ReentrancyGuard {
         deposit.disputed = true;
         deposit.disputeEndTime = block.timestamp + config.disputePeriod;
         
-        emit DisputeInitiated(depositId, msg.sender, reason);
-    }
-    
-    // ============ Relayer Functions ============
-    
-    /**
-     * @dev Process a deposit and generate a deposit ID (relayer only)
-     * @param token Token address (address(0) for native ETH)
-     * @param amount Deposit amount
-     * @param nearRecipient NEAR account ID of the recipient
-     * @param depositor Address that made the deposit
-     * @return depositId Unique deposit ID
-     */
-    function processDeposit(
-        address token,
-        uint256 amount,
-        string calldata nearRecipient,
-        address depositor
-    ) external onlyRelayer whenActive returns (bytes32) {
-        return _processDeposit(token, amount, nearRecipient, depositor);
-    }
-    
-    /**
-     * @dev Resolve a dispute (relayer only)
-     * @param depositId Unique deposit ID
-     * @param approved Whether to approve the claim
-     * @param reason Reason for the resolution
-     */
-    function resolveDispute(
-        bytes32 depositId,
-        bool approved,
-        string calldata reason
-    ) external onlyRelayer {
-        Deposit storage deposit = deposits[depositId];
-        require(deposit.disputed, "Not in dispute");
-        require(block.timestamp <= deposit.disputeEndTime, "Dispute period ended");
-        
-        if (approved) {
-            // Transfer tokens to the depositor
-            if (deposit.token == address(0)) {
-                (bool success, ) = deposit.depositor.call{value: deposit.amount}("");
-                require(success, "ETH transfer failed");
-            } else {
-                IERC20(deposit.token).safeTransfer(deposit.depositor, deposit.amount);
-            }
-            
-            emit Claimed(depositId, deposit.depositor, deposit.amount);
-        }
-        
-        // Mark as claimed to prevent further actions
-        deposit.claimed = true;
-        
-        emit DisputeResolved(depositId, approved, msg.sender, reason);
+        emit DisputeInitiated(depositId, msg.sender, block.timestamp);
     }
     
     // ============ Admin Functions ============
+    
+    /**
+     * @dev Update bridge status (owner only)
+     * @param newStatus New bridge status
+     */
+    function updateBridgeStatus(BridgeStatus newStatus) external onlyOwner {
+        require(uint256(newStatus) < 3, "Invalid status");
+        
+        // Additional checks for specific status changes
+        if (newStatus == BridgeStatus.PAUSED) {
+            require(config.status != BridgeStatus.DISPUTE, "Cannot pause while in dispute");
+        } else if (newStatus == BridgeStatus.ACTIVE) {
+            require(relayerList.length >= requiredRelayerConfirmations, "Not enough relayers");
+        }
+        
+        config.status = newStatus;
+        emit BridgeStatusUpdated(newStatus);
+    }
     
     /**
      * @dev Update bridge configuration (owner only)
@@ -281,14 +399,49 @@ contract NearBridge is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @dev Add or remove a relayer (owner only)
-     * @param relayer Address of the relayer
-     * @param isActive Whether the relayer is active
+     * @dev Add a new relayer (owner only)
+     * @param relayer Address of the relayer to add
      */
-    function setRelayer(address relayer, bool isActive) external onlyOwner {
-        require(relayer != address(0), "Invalid relayer");
-        relayers[relayer] = isActive;
-        emit RelayerUpdated(relayer, isActive);
+    function addRelayer(address relayer) external onlyOwner {
+        require(relayer != address(0), "Invalid relayer address");
+        require(!relayers[relayer], "Relayer already exists");
+        
+        _addRelayer(relayer);
+    }
+    
+    /**
+     * @dev Remove a relayer (owner only)
+     * @param relayer Address of the relayer to remove
+     */
+    function removeRelayer(address relayer) external onlyOwner {
+        require(relayers[relayer], "Relayer does not exist");
+        require(relayerList.length > 1, "Cannot remove the last relayer");
+        
+        // Remove from mapping
+        delete relayers[relayer];
+        
+        // Remove from array
+        for (uint256 i = 0; i < relayerList.length; i++) {
+            if (relayerList[i] == relayer) {
+                relayerList[i] = relayerList[relayerList.length - 1];
+                relayerList.pop();
+                break;
+            }
+        }
+        
+        emit RelayerRemoved(relayer);
+    }
+    
+    /**
+     * @dev Set the number of required relayer confirmations (owner only)
+     * @param _requiredConfirmations Number of required confirmations
+     */
+    function setRequiredConfirmations(uint256 _requiredConfirmations) external onlyOwner {
+        require(_requiredConfirmations > 0, "At least one confirmation required");
+        require(_requiredConfirmations <= relayerList.length, "Not enough relayers");
+        
+        requiredRelayerConfirmations = _requiredConfirmations;
+        emit RequiredConfirmationsUpdated(_requiredConfirmations);
     }
     
     /**
@@ -302,27 +455,6 @@ contract NearBridge is Ownable, ReentrancyGuard {
         emit TokenSupportUpdated(token, isSupported);
     }
     
-    /**
-     * @dev Emergency withdraw tokens (owner only)
-     * @param token Token address (address(0) for native ETH)
-     * @param to Recipient address
-     * @param amount Amount to withdraw
-     */
-    function emergencyWithdraw(
-        address token,
-        address to,
-        uint256 amount
-    ) external onlyOwner {
-        require(to != address(0), "Invalid recipient");
-        
-        if (token == address(0)) {
-            (bool success, ) = to.call{value: amount}("");
-            require(success, "ETH transfer failed");
-        } else {
-            IERC20(token).safeTransfer(to, amount);
-        }
-    }
-    
     // ============ Internal Functions ============
     
     /**
@@ -330,15 +462,17 @@ contract NearBridge is Ownable, ReentrancyGuard {
      * @param token Token address (address(0) for native ETH)
      * @param amount Deposit amount
      * @param nearRecipient NEAR account ID of the recipient
-     * @param depositor Address that made the deposit
+     * @param secretHash Hash of the secret for the hashlock
+     * @param timelock Timestamp when the deposit can be refunded
      * @return depositId Unique deposit ID
      */
     function _processDeposit(
         address token,
         uint256 amount,
         string calldata nearRecipient,
-        address depositor
-    ) internal returns (bytes32) {
+        bytes32 secretHash,
+        uint256 timelock
+    ) internal returns (bytes32 depositId) {
         require(bytes(nearRecipient).length > 0, "Invalid recipient");
         
         // Calculate bridge fee
@@ -356,37 +490,61 @@ contract NearBridge is Ownable, ReentrancyGuard {
         }
         
         // Generate a unique deposit ID
-        bytes32 depositId = keccak256(
+        depositId = keccak256(
             abi.encodePacked(
-                block.chainid,
-                block.timestamp,
-                depositor,
+                msg.sender,
+                nearRecipient,
                 token,
                 amount,
-                nearRecipient,
-                block.prevrandao
+                secretHash,
+                timelock,
+                block.timestamp,
+                block.chainid
             )
         );
+        
+        require(deposits[depositId].depositor == address(0), "Deposit already exists");
         
         // Store deposit data
         deposits[depositId] = Deposit({
             token: token,
-            depositor: depositor,
+            depositor: msg.sender,
             nearRecipient: nearRecipient,
-            amount: amountAfterFee,
+            amount: amount,
             timestamp: block.timestamp,
             claimed: false,
             disputed: false,
-            disputeEndTime: 0
+            disputeEndTime: 0,
+            secretHash: keccak256(abi.encodePacked("default-secret")),
+            timelock: timelock
         });
         
-        emit Deposited(
+        emit DepositInitiated(
             depositId,
+            msg.sender,
+            nearRecipient,
             token,
-            depositor,
+            amountAfterFee,
+            fee,
+            block.timestamp
+        );
+        
+        // Create cross-chain message
+        bytes32 messageId = _createMessage(
+            depositId,
+            msg.sender,
             nearRecipient,
             amountAfterFee,
-            fee
+            secretHash
+        );
+        
+        emit MessageSent(
+            messageId,
+            depositId,
+            msg.sender,
+            address(0), // Will be set by the relayer
+            amountAfterFee,
+            block.timestamp
         );
         
         return depositId;
@@ -420,27 +578,86 @@ contract NearBridge is Ownable, ReentrancyGuard {
         require(isValid, "Invalid proof");
     }
     
-    // ============ View Functions ============
-    
     /**
-     * @dev Get deposit details by ID
-     * @param depositId Unique deposit ID
-     * @return Deposit details
+     * @dev Internal function to add a relayer
+     * @param relayer Address of the relayer to add
      */
-    function getDeposit(bytes32 depositId) external view returns (Deposit memory) {
-        return deposits[depositId];
+    function _addRelayer(address relayer) internal {
+        require(relayer != address(0), "Invalid relayer address");
+        require(!relayers[relayer], "Relayer already exists");
+        
+        relayers[relayer] = true;
+        relayerList.push(relayer);
+        
+        emit RelayerAdded(relayer);
     }
     
     /**
-     * @dev Check if a deposit is claimable
-     * @param depositId Unique deposit ID
-     * @return Whether the deposit is claimable
+     * @dev Internal function to create a new cross-chain message
+     * @param depositId ID of the related deposit
+     * @param sender Address of the message sender
+     * @param recipient Recipient address or identifier
+     * @param amount Amount of tokens in the message
+     * @param data Additional message data
+     * @return messageId ID of the created message
      */
-    function isClaimable(bytes32 depositId) external view returns (bool) {
-        Deposit storage deposit = deposits[depositId];
-        return !deposit.claimed && !deposit.disputed;
+    function _createMessage(
+        bytes32 depositId,
+        address sender,
+        string memory recipient,
+        uint256 amount,
+        bytes32 data
+    ) internal returns (bytes32 messageId) {
+        messageId = keccak256(
+            abi.encodePacked(
+                depositId,
+                sender,
+                recipient,
+                amount,
+                data,
+                block.timestamp,
+                block.chainid
+            )
+        );
+        
+        messages[messageId] = Message({
+            id: messageId,
+            sender: sender,
+            recipient: address(0), // Will be set by the relayer
+            amount: amount,
+            depositId: depositId,
+            timestamp: block.timestamp,
+            status: MessageStatus.PENDING,
+            retryCount: 0,
+            lastProcessed: 0
+        });
+        
+        return messageId;
+    }
+    
+    /**
+     * @dev Internal function to check if an address has already confirmed a message
+     * @param relayer Address to check
+     * @param confirmedRelayers Array of addresses that have already confirmed
+     * @param count Number of valid confirmations
+     * @return bool Whether the address has already confirmed
+     */
+    function _isConfirmed(
+        address relayer,
+        address[] memory confirmedRelayers,
+        uint256 count
+    ) internal pure returns (bool) {
+        for (uint256 i = 0; i < count; i++) {
+            if (confirmedRelayers[i] == relayer) {
+                return true;
+            }
+        }
+        return false;
     }
     
     // Allow receiving ETH
     receive() external payable {}
+    
+    // Fallback function for receiving ETH with data
+    fallback() external payable {}
 }

@@ -6,8 +6,10 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/Create2.sol";
+import "@1inch/solidity-utils/contracts/libraries/AddressLib.sol";
 import "../lib/cross-chain-swap/contracts/EscrowFactory.sol";
 import "../lib/cross-chain-swap/contracts/libraries/ImmutablesLib.sol";
+import "../lib/cross-chain-swap/contracts/libraries/TimelocksLib.sol";
 import "../lib/cross-chain-swap/contracts/interfaces/IBaseEscrow.sol";
 
 /**
@@ -29,6 +31,11 @@ contract TestEscrowFactory is EscrowFactory, Ownable {
     
     // Mapping to track NEAR escrows
     mapping(address => bool) public nearEscrows;
+    
+    // NEAR account ID validation constants
+    uint8 public constant MIN_NEAR_ACCOUNT_LENGTH = 2;
+    uint8 public constant MAX_NEAR_ACCOUNT_LENGTH = 64;
+    bytes1 public constant NEAR_ACCOUNT_SEPARATOR = bytes1('.');
 
     constructor(
         address limitOrderProtocol,
@@ -66,9 +73,21 @@ contract TestEscrowFactory is EscrowFactory, Ownable {
         bytes32 creationCode = _PROXY_DST_BYTECODE_HASH;
         address escrow = Create2.computeAddress(salt, creationCode);
         
-        // TODO: Implement NEAR escrow identification logic here
-        // For now, we're not marking any escrows as NEAR escrows
-        // In the future, we can use a different mechanism to identify NEAR escrows
+        // Check if this is a NEAR-related escrow by validating the taker address as a NEAR account ID
+        string memory takerAddress = string(abi.encodePacked(AddressLib.get(dstImmutables.taker)));
+        
+        if (isValidNearAccount(takerAddress)) {
+            nearEscrows[escrow] = true;
+            
+            // Emit event for NEAR escrow creation
+            emit NearEscrowCreated(
+                escrow,
+                takerAddress,
+                dstImmutables.amount,
+                dstImmutables.hashlock,
+                block.timestamp + TimelocksLib.get(dstImmutables.timelocks, TimelocksLib.Stage.DstWithdrawal)
+            );
+        }
     }
     
     /**
@@ -78,6 +97,57 @@ contract TestEscrowFactory is EscrowFactory, Ownable {
      */
     function isNearEscrow(address escrow) external view returns (bool) {
         return nearEscrows[escrow];
+    }
+    
+    /**
+     * @notice Validate if a string is a valid NEAR account ID
+     * @dev NEAR account IDs must be 2-64 characters long, can contain lowercase alphanumeric characters,
+     *      separated by dots (.), and cannot start or end with a dot or have consecutive dots.
+     * @param accountId The account ID to validate
+     * @return bool True if the account ID is valid
+     */
+    function isValidNearAccount(string memory accountId) public pure returns (bool) {
+        bytes memory accountBytes = bytes(accountId);
+        uint256 length = accountBytes.length;
+        
+        // Check length constraints
+        if (length < MIN_NEAR_ACCOUNT_LENGTH || length > MAX_NEAR_ACCOUNT_LENGTH) {
+            return false;
+        }
+        
+        // Check if the first or last character is a dot
+        if (accountBytes[0] == NEAR_ACCOUNT_SEPARATOR || accountBytes[length - 1] == NEAR_ACCOUNT_SEPARATOR) {
+            return false;
+        }
+        
+        bool hasDot = false;
+        
+        // Iterate through each character in the account ID
+        for (uint256 i = 0; i < length; i++) {
+            bytes1 char = accountBytes[i];
+            
+            // Check for valid characters (lowercase alphanumeric or dot)
+            if (
+                !(char >= 0x30 && char <= 0x39) && // 0-9
+                !(char >= 0x61 && char <= 0x7A) &&  // a-z
+                char != 0x5F &&                     // _
+                char != NEAR_ACCOUNT_SEPARATOR      // .
+            ) {
+                return false;
+            }
+            
+            // Check for consecutive dots
+            if (char == NEAR_ACCOUNT_SEPARATOR) {
+                if (hasDot) {
+                    return false; // Consecutive dots
+                }
+                hasDot = true;
+            } else {
+                hasDot = false;
+            }
+        }
+        
+        return true;
     }
     
     /**
