@@ -1,0 +1,91 @@
+{
+  "scenarios": [
+    {
+      "name": "ETH to NEAR Swap",
+      "description": "Swap ETH on Sepolia for NEAR on testnet",
+      "sourceChain": "sepolia",
+      "targetChain": "near-testnet",
+      "sourceToken": "ETH",
+      "targetToken": "NEAR",
+      "amount": "0.01",
+      "estimatedTime": "5 minutes"
+    },
+    {
+      "name": "NEAR to ETH Swap",
+      "description": "Swap NEAR on testnet for ETH on Sepolia",
+      "sourceChain": "near-testnet",
+      "targetChain": "sepolia",
+      "sourceToken": "NEAR",
+      "targetToken": "ETH",
+      "amount": "10",
+      "estimatedTime": "5 minutes"
+    }
+  ],
+  "testWallets": {
+    "ethereum": {
+      "deployer": {
+        "address": "0xf387229980fFCC03300f10aa229b9A2be5ab1D40",
+        "privateKey": "cc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad",
+        "balance": "0.996091659994933506"
+      },
+      "user1": {
+        "address": "0xEE24aF1E52Fe0A30C03E1db640eEf7FAE9e5C67D",
+        "privateKey": "0xad22702986534b422c7f70a61b206d12cab7b45e8b08f6521de0a2972f1e6373",
+        "balance": "0.1"
+      },
+      "user2": {
+        "address": "0xcf839e45Db8507D06003B01A4372caaaE1428728",
+        "privateKey": "0x84456f08fab657d75319ec0c2ed78c4f2749f35b9810fc36e4539a9d51de2093",
+        "balance": "0.1"
+      }
+    },
+    "near": {
+      "deployer": {
+        "accountId": "",
+        "privateKey": "",
+        "balance": "0"
+      },
+      "user1": {
+        "accountId": "",
+        "privateKey": "",
+        "balance": "0"
+      },
+      "user2": {
+        "accountId": "",
+        "privateKey": "",
+        "balance": "0"
+      }
+    }
+  },
+  "contracts": {
+    "sepolia": {
+      "NearBridge": {
+        "address": "0x3C4467a2fe3dc189Dd40d7d54E42B00D67242416",
+        "deployedAt": "2025-07-30T09:28:02.222Z",
+        "txHash": "0xb18053e327ca7a22a9d01800074dba9c50d64343e32028b97b6efa0d733fa455"
+      },
+      "TestEscrowFactory": {
+        "address": "0x280926f7837Be249FDE1100a793c8e5c5B1C00Db",
+        "txHash": "0x18f9456e32e8903089c5549dd27778d620f9efab012ceb9abeaa9788ccb0462e",
+        "deployedAt": "2025-07-30T09:28:15.952Z"
+      },
+      "FeeToken": {
+        "address": "0x4689892c9C22632A921F9ACF57c1CffC25015897",
+        "deployedAt": "2025-07-30T09:27:40.199Z",
+        "txHash": "0x6acb985ade841256761854284d5294e4a1f669d395adc265c546ead773d8bd29"
+      }
+    },
+    "near-testnet": {
+      "CrossChainSolver": {
+        "accountId": "",
+        "deployedAt": "",
+        "txHash": ""
+      },
+      "EscrowContract": {
+        "accountId": "",
+        "deployedAt": "",
+        "txHash": ""
+      }
+    }
+  }
+}

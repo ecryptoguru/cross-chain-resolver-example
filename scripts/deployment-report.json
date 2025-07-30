@@ -1,0 +1,53 @@
+{
+  "deployment": {
+    "network": "Sepolia Testnet",
+    "chainId": 11155111,
+    "deployer": "0xf387229980fFCC03300f10aa229b9A2be5ab1D40",
+    "timestamp": "2025-07-30T09:23:28.904Z"
+  },
+  "contracts": {
+    "NearBridge": {
+      "address": "0x4A75BC3F96554949D40d2B9fA02c070d8ae12881",
+      "deployedAt": "2025-07-30T09:22:50.774Z",
+      "txHash": "0x60a158565d9bdff6c3299edee148ecb0d7b2fd5797fe038744e2b753b6335eab"
+    },
+    "TestEscrowFactory": {
+      "address": "0xedFf8aD3f18d912e0a40247e5a246CB76aCedDE7",
+      "txHash": "0x75cfe4488da0524e34a9abbed37dc08b92fbce71353644526df3ba1aa4b3249c",
+      "deployedAt": "2025-07-30T09:23:04.428Z"
+    },
+    "FeeToken": {
+      "address": "0x7FC00Ae5A60a9aC47A1042A2Cc8a5171aD3C8f6d",
+      "deployedAt": "2025-07-30T09:22:37.120Z",
+      "txHash": "0x211d9522805c24d35429bf858044d61a2f4b18e58c7b06c40aafa7e7bd316955"
+    }
+  },
+  "testWallets": {
+    "deployer": {
+      "address": "0xf387229980fFCC03300f10aa229b9A2be5ab1D40",
+      "privateKey": "cc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad",
+      "balance": "1.197376870262571672"
+    },
+    "user1": {
+      "address": "0x17a1dEd032F1Ca71c37D8cEAd22230939845A948",
+      "privateKey": "0x76db3227aa282e68cc6ef0a661d3e4ae5b7284b20e10815a9b6aa99f8192114f",
+      "balance": "0.1"
+    },
+    "user2": {
+      "address": "0xFfE9A4E845e5E1740D383984Cb72346a318630eA",
+      "privateKey": "0xa7cf8cc550c601cdd7fd2eb69b1174c50828c47ec3d4e5e9e0dde474d01e5fc3",
+      "balance": "0.1"
+    }
+  },
+  "explorerLinks": {
+    "nearBridge": "https://sepolia.etherscan.io/address/0x4A75BC3F96554949D40d2B9fA02c070d8ae12881",
+    "testEscrowFactory": "https://sepolia.etherscan.io/address/0xedFf8aD3f18d912e0a40247e5a246CB76aCedDE7",
+    "feeToken": "https://sepolia.etherscan.io/address/0x7FC00Ae5A60a9aC47A1042A2Cc8a5171aD3C8f6d"
+  },
+  "nextSteps": [
+    "Deploy NEAR contracts to testnet",
+    "Start relayer service",
+    "Run cross-chain swap demo",
+    "Verify transaction flows"
+  ]
+}

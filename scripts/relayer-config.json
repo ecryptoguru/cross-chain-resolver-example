@@ -1,0 +1,21 @@
+{
+  "ethereum": {
+    "rpcUrl": "https://eth-sepolia.public.blastapi.io",
+    "contracts": {
+      "nearBridge": "0x3C4467a2fe3dc189Dd40d7d54E42B00D67242416"
+    },
+    "privateKey": "cc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad",
+    "blockConfirmations": 3,
+    "pollInterval": 5000,
+    "retryAttempts": 3
+  },
+  "near": {
+    "rpcUrl": "https://rpc.testnet.near.org",
+    "contracts": {
+      "crossChainSolver": "solver.testnet"
+    },
+    "blockConfirmations": 1,
+    "pollInterval": 2000,
+    "retryAttempts": 3
+  }
+}
