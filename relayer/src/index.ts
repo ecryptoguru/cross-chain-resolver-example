@@ -2,10 +2,7 @@ import dotenv from 'dotenv';
 import { ethers, providers, Wallet } from 'ethers';
 import { Account } from '@near-js/accounts';
 import { JsonRpcProvider } from '@near-js/providers';
-import { KeyPair } from '@near-js/crypto';
-import { InMemoryKeyStore } from '@near-js/keystores';
 import { KeyPairSigner } from '@near-js/signers';
-import { KeyStores } from '@near-js/keystores';
 import { EthereumRelayer } from './relay/ethereum.js';
 import { NearRelayer } from './relay/near.js';
 import { logger } from './utils/logger.js';
@@ -39,20 +36,20 @@ async function main() {
     logger.info(`Connected to Ethereum network: ${await ethereumProvider.getNetwork().then(n => n.name)} (${process.env.ETHEREUM_CHAIN_ID})`);
     logger.info(`Ethereum relayer address: ${await ethereumSigner.getAddress()}`);
 
-    // Initialize NEAR key store and signer
-    const keyStore = new InMemoryKeyStore();
-    const keyPair = KeyPair.fromSecretKey(process.env.NEAR_RELAYER_PRIVATE_KEY!);
-    await keyStore.setKey(process.env.NEAR_NETWORK_ID!, process.env.NEAR_RELAYER_ACCOUNT_ID!, keyPair);
-    const signer = new KeyPairSigner(keyPair);
-
-    // Connect to NEAR
+    // Initialize NEAR signer and provider
+    const signer = KeyPairSigner.fromSecretKey(process.env.NEAR_RELAYER_PRIVATE_KEY! as any);
     const provider = new JsonRpcProvider({ url: process.env.NEAR_NODE_URL! });
-    const nearAccount = new Account({
-      networkId: process.env.NEAR_NETWORK_ID!,
-      provider,
-      signer,
+    
+    // Create NEAR account with proper structure
+    const nearAccount = {
       accountId: process.env.NEAR_RELAYER_ACCOUNT_ID!,
-    });
+      connection: {
+        provider,
+        signer,
+      },
+      provider, // Add provider at top level for compatibility
+      signer,   // Add signer at top level for compatibility
+    } as any;
 
     logger.info(`Connected to NEAR network: ${process.env.NEAR_NETWORK_ID}`);
     logger.info(`NEAR account ID: ${nearAccount.accountId}`);
