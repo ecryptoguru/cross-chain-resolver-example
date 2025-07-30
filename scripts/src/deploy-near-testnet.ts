@@ -120,16 +120,16 @@ class NearTestnetDeployer {
   }
 
   private async deployCrossChainSolver(): Promise<void> {
-    console.log('\n📦 Deploying CrossChainSolver contract...');
-
-    const contractPath = path.join(__dirname, '../../near-solver/target/wasm32-unknown-unknown/release/near_solver.wasm');
+    console.log('\n📦 Deploying EscrowContract contract...');
+    
+    const contractPath = path.join(__dirname, '../../near-contracts/escrow/target/wasm32-unknown-unknown/release/escrow.wasm');
     
     // Check if contract is built
     if (!fs.existsSync(contractPath)) {
-      console.log('Building NEAR contract...');
-      const nearSolverDir = path.join(__dirname, '../../near-solver');
+      console.log('Building NEAR escrow contract...');
+      const escrowDir = path.join(__dirname, '../../near-contracts/escrow');
       execSync('cargo build --target wasm32-unknown-unknown --release', {
-        cwd: nearSolverDir,
+        cwd: escrowDir,
         stdio: 'inherit'
       });
     }
@@ -180,10 +180,11 @@ class NearTestnetDeployer {
         stdio: 'inherit'
       });
 
-      // Deploy contract
-      execSync(`near deploy --accountId ${contractAccount} --wasmFile ${contractPath}`, {
-        stdio: 'inherit'
-      });
+      // Deploy contract with initialization
+      const deployResult = execSync(
+        `near contract deploy ${contractAccount} use-file ${contractPath} with-init-call new json-args '{"owner_id":"${contractAccount}","tee_registry_id":"tee-registry.testnet"}' prepaid-gas '300.0 Tgas' attached-deposit '0 NEAR' network-config testnet sign-with-keychain send`,
+        { encoding: 'utf8', cwd: process.cwd() }
+      );
 
       this.config.contracts.escrowContract = contractAccount;
       console.log(`✅ Escrow contract deployed to: ${contractAccount}`);

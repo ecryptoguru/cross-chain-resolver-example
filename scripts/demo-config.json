@@ -26,16 +26,16 @@
       "deployer": {
         "address": "0xf387229980fFCC03300f10aa229b9A2be5ab1D40",
         "privateKey": "cc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad",
-        "balance": "0.996091659994933506"
+        "balance": "0.794894732150705033"
       },
       "user1": {
-        "address": "0xEE24aF1E52Fe0A30C03E1db640eEf7FAE9e5C67D",
-        "privateKey": "0xad22702986534b422c7f70a61b206d12cab7b45e8b08f6521de0a2972f1e6373",
+        "address": "0xE327824023ED28229d0CC66b173f89AFBac228fb",
+        "privateKey": "0xce2390732c92558b984c6ca9af89712fe95b8ca75f4517a37c800bf40c787398",
         "balance": "0.1"
       },
       "user2": {
-        "address": "0xcf839e45Db8507D06003B01A4372caaaE1428728",
-        "privateKey": "0x84456f08fab657d75319ec0c2ed78c4f2749f35b9810fc36e4539a9d51de2093",
+        "address": "0x164Fc70a9057Bfe8A4B7275aD45bec660f5dc7a3",
+        "privateKey": "0xbbdf2295418dda3b694328a759798e1daa3f5a38b10ee52ec95079582dabfdbd",
         "balance": "0.1"
       }
     },
@@ -60,19 +60,19 @@
   "contracts": {
     "sepolia": {
       "NearBridge": {
-        "address": "0x3C4467a2fe3dc189Dd40d7d54E42B00D67242416",
-        "deployedAt": "2025-07-30T09:28:02.222Z",
-        "txHash": "0xb18053e327ca7a22a9d01800074dba9c50d64343e32028b97b6efa0d733fa455"
+        "address": "0x4b0B79ab6534186003fB5EE682D87cbdF865A3f1",
+        "deployedAt": "2025-07-30T09:45:03.617Z",
+        "txHash": "0xff2ba097fc8d9861b05b41e8152732682f24d4917a8c9afbe3c06c442f914e51"
       },
       "TestEscrowFactory": {
-        "address": "0x280926f7837Be249FDE1100a793c8e5c5B1C00Db",
-        "txHash": "0x18f9456e32e8903089c5549dd27778d620f9efab012ceb9abeaa9788ccb0462e",
-        "deployedAt": "2025-07-30T09:28:15.952Z"
+        "address": "0x42943188e0Be8674375c0a79b8F22e2a153e2400",
+        "txHash": "0x2e3c3b591961ad5c109cc1301593fe5b78df28dc743ee7c88bf64160ec52d3e2",
+        "deployedAt": "2025-07-30T09:45:17.321Z"
       },
       "FeeToken": {
-        "address": "0x4689892c9C22632A921F9ACF57c1CffC25015897",
-        "deployedAt": "2025-07-30T09:27:40.199Z",
-        "txHash": "0x6acb985ade841256761854284d5294e4a1f669d395adc265c546ead773d8bd29"
+        "address": "0x00b06667dbAC7113beBEF3726d3Bc3829D6F18a0",
+        "deployedAt": "2025-07-30T09:44:49.925Z",
+        "txHash": "0x8c569700190e857f8a6ad602d2b9289c71ad4e20d586e34576535e71c4c143bb"
       }
     },
     "near-testnet": {

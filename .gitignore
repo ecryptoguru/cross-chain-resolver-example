@@ -141,6 +141,5 @@ nearprotocol.md
 solver.md
 
 package-lock.json
-near-contracts/escrow
 lib/contracts/lib
 near-solver/test-standalone/target

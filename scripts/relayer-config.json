@@ -2,7 +2,7 @@
   "ethereum": {
     "rpcUrl": "https://eth-sepolia.public.blastapi.io",
     "contracts": {
-      "nearBridge": "0x3C4467a2fe3dc189Dd40d7d54E42B00D67242416"
+      "nearBridge": "0x4b0B79ab6534186003fB5EE682D87cbdF865A3f1"
     },
     "privateKey": "cc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad",
     "blockConfirmations": 3,
