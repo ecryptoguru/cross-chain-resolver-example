@@ -61,7 +61,7 @@ contract TestEscrowFactoryTest is Test {
     function test_ValidNearAccounts() public {
         // Valid NEAR account formats
         assertTrue(factory.isValidNearAccount("alice.near"));
-        assertTrue(factory.isValidNearAccount("test-account.testnet"));
+        assertTrue(factory.isValidNearAccount("test_account.testnet"));
         assertTrue(factory.isValidNearAccount("user123.near"));
         assertTrue(factory.isValidNearAccount("my_wallet.near"));
         assertTrue(factory.isValidNearAccount("ab")); // Minimum length

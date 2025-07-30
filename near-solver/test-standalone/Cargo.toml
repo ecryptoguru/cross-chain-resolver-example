@@ -1,5 +1,5 @@
 [package]
-name = "near-solver"
+name = "near-phase2-tests"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,9 +15,6 @@ thiserror = "1.0.40"
 anyhow = "1.0.71"
 tokio = { version = "1.28.0", features = ["full"] }
 async-trait = "0.1.68"
-
-# Testing
-rstest = "0.17.0"
 
 [dev-dependencies]
 tokio-test = "0.4.2"

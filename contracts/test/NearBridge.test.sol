@@ -173,7 +173,7 @@ contract NearBridgeTest is Test {
     
     function test_Revert_AddZeroAddressAsRelayer() public {
         // Should not allow adding zero address as relayer
-        vm.expectRevert(INVALID_RELAYER_ADDRESS_SELECTOR);
+        vm.expectRevert("Invalid relayer address");
         vm.prank(owner);
         nearBridge.addRelayer(address(0));
     }
@@ -207,8 +207,9 @@ contract NearBridgeTest is Test {
             block.timestamp + 1 days
         );
         
-        // Check contract received ETH
-        assertEq(address(nearBridge).balance, depositAmount);
+        // Check contract received ETH (minus bridge fee)
+        uint256 expectedBalance = depositAmount - (depositAmount * BRIDGE_FEE_BPS / 10000);
+        assertEq(address(nearBridge).balance, expectedBalance);
     }
     
     function test_DepositToken() public {
@@ -231,8 +232,9 @@ contract NearBridgeTest is Test {
             block.timestamp + 1 days
         );
         
-        // Check tokens were transferred
-        assertEq(token.balanceOf(address(nearBridge)), depositAmount);
+        // Check tokens were transferred (minus bridge fee)
+        uint256 expectedBalance = depositAmount - (depositAmount * BRIDGE_FEE_BPS / 10000);
+        assertEq(token.balanceOf(address(nearBridge)), expectedBalance);
     }
     
     function test_EmergencyWithdraw() public {

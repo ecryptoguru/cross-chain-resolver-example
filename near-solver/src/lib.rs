@@ -328,7 +328,3 @@ mod tests {
         contract.process_order(order);
     }
 }
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
