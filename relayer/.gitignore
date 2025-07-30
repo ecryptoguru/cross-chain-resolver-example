@@ -134,3 +134,6 @@ cache
 .idea
 
 package-lock.json
+
+CONFIGURATION_GUIDE.md
+RELAYER_ARCHITECTURE.md
