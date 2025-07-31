@@ -173,37 +173,46 @@ impl EscrowContract {
     }
 
     pub fn fill_order(&mut self, order_id: String, preimage: String, caller: &str) -> Result<(), String> {
-        let order = self.orders.get_mut(&order_id)
-            .ok_or("Order not found")?;
+        // First, verify the hashlock without holding a mutable reference to the order
+        let hashlock = {
+            let order = self.orders.get(&order_id)
+                .ok_or("Order not found")?;
+            
+            if order.status != OrderStatus::Pending {
+                return Err("Order is not pending".to_string());
+            }
 
-        if order.status != OrderStatus::Pending {
-            return Err("Order is not pending".to_string());
-        }
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
 
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            if current_time > order.expires_at {
+                return Err("Order has expired".to_string());
+            }
 
-        if current_time > order.expires_at {
-            return Err("Order has expired".to_string());
-        }
-
-        if current_time > order.timelock {
-            return Err("Order timelock has expired".to_string());
-        }
+            if current_time > order.timelock {
+                return Err("Order timelock has expired".to_string());
+            }
+            
+            order.hashlock.clone()
+        };
 
         // Verify preimage matches hashlock
-        if !self.verify_hashlock(&order.hashlock, &preimage) {
+        if !self.verify_hashlock(&hashlock, &preimage) {
             return Err("Invalid preimage".to_string());
         }
 
-        // Fill the order
-        order.status = OrderStatus::Filled;
-        order.taker = Some(caller.to_string());
-        self.add_to_taker_orders(caller, &order_id);
-
-        Ok(())
+        // Now we can get a mutable reference to update the order status
+        if let Some(order) = self.orders.get_mut(&order_id) {
+            // Fill the order
+            order.status = OrderStatus::Filled;
+            order.taker = Some(caller.to_string());
+            self.add_to_taker_orders(caller, &order_id);
+            Ok(())
+        } else {
+            Err("Order not found after validation".to_string())
+        }
     }
 
     pub fn cancel_order(&mut self, order_id: String, caller: &str) -> Result<(), String> {

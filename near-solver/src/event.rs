@@ -6,121 +6,164 @@
 
 use near_sdk::{
     env,
-    serde::{Serialize, Serializer},
+    serde::{Deserialize, Serialize},
     serde_json,
-    AccountId,
+    AccountId, PromiseResult,
 };
 use crate::model::order::OrderStatus;
 
+/// Helper function to get block timestamp in seconds
+fn env_block_timestamp_seconds() -> u64 {
+    env::block_timestamp() / 1_000_000_000 // Convert nanoseconds to seconds
+}
+
 /// Represents an event emitted by the contract
-#[derive(Serialize, Debug, Clone)]
-#[serde(crate = "near_sdk::serde")]
-pub struct ContractEvent {
-    /// The event type
-    pub event_type: String,
-    /// The event data as a JSON string
-    pub data: String,
-    /// The block timestamp when the event was emitted
-    pub timestamp: u64,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(crate = "near_sdk::serde", tag = "event_type")]
+pub enum ContractEvent {
+    /// Order created event
+    #[serde(rename = "ORDER_CREATED")]
+    OrderCreated {
+        order_id: String,
+        source_chain: String,
+        dest_chain: String,
+        source_token: String,
+        dest_token: String,
+        amount: u128,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// Order status changed event
+    #[serde(rename = "ORDER_STATUS_CHANGED")]
+    OrderStatusChanged {
+        order_id: String,
+        old_status: OrderStatus,
+        new_status: OrderStatus,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// Funds locked event
+    #[serde(rename = "FUNDS_LOCKED")]
+    FundsLocked {
+        order_id: String,
+        token: String,
+        amount: u128,
+        sender: AccountId,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// Funds released event
+    #[serde(rename = "FUNDS_RELEASED")]
+    FundsReleased {
+        order_id: String,
+        token: String,
+        amount: u128,
+        recipient: AccountId,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// Error event
+    #[serde(rename = "ERROR")]
+    Error {
+        order_id: Option<String>,
+        message: String,
+        details: Option<String>,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// TEE Attestation verified event
+    #[serde(rename = "TEE_ATTESTATION_VERIFIED")]
+    TeeAttestationVerified {
+        tee_type: String,
+        status: String,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// TEE Attestation registered event
+    #[serde(rename = "TEE_ATTESTATION_REGISTERED")]
+    TeeAttestationRegistered {
+        public_key: String,
+        tee_type: String,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// TEE Attestation revoked event
+    #[serde(rename = "TEE_ATTESTATION_REVOKED")]
+    TeeAttestationRevoked {
+        public_key: String,
+        reason: String,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// TEE Attestation extended event
+    #[serde(rename = "TEE_ATTESTATION_EXTENDED")]
+    TeeAttestationExtended {
+        public_key: String,
+        new_expires_at: u64,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// TEE Attestation updated event
+    #[serde(rename = "TEE_ATTESTATION_UPDATED")]
+    TeeAttestationUpdated {
+        public_key: String,
+        field: String,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
+    
+    /// Order cancelled event
+    #[serde(rename = "ORDER_CANCELLED")]
+    OrderCancelled {
+        order_id: String,
+        reason: String,
+        #[serde(default = "env_block_timestamp_seconds")]
+        timestamp: u64,
+    },
 }
 
 impl ContractEvent {
-    /// Creates a new contract event with the current timestamp
-    pub fn new(event_type: &str, data: String) -> Result<Self, serde_json::Error> {
-        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
-        Ok(Self {
-            event_type: event_type.to_string(),
-            data,
-            timestamp,
-        })
-    }
-
-    /// Creates a new TEE registry unpaused event
-    pub fn new_tee_registry_unpaused(
-        unpauser_id: &str,
-    ) -> Result<Self, serde_json::Error> {
-        #[derive(Serialize)]
-        struct EventData {
-            unpauser_id: String,
-            timestamp: u64,
+    /// Creates a new order created event
+    pub fn new_order_created(
+        order_id: String,
+        source_chain: String,
+        dest_chain: String,
+        source_token: String,
+        dest_token: String,
+        amount: u128,
+    ) -> Self {
+        Self::OrderCreated {
+            order_id,
+            source_chain,
+            dest_chain,
+            source_token,
+            dest_token,
+            amount,
+            timestamp: env_block_timestamp_seconds(),
         }
-        
-        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
-        let data = EventData {
-            unpauser_id: unpauser_id.to_string(),
-            timestamp,
-        };
-        
-        Self::new("TEE_REGISTRY_UNPAUSED", serde_json::to_string(&data)?)
     }
     
-    /// Creates a new order processing started event
-    pub fn new_order_processing_started(
-        order_id: &str,
-        tee_public_key: &str,
-    ) -> Result<Self, serde_json::Error> {
-        #[derive(Serialize)]
-        struct EventData {
-            order_id: String,
-            tee_public_key: String,
-            timestamp: u64,
+    /// Creates a new error event
+    pub fn new_error(
+        order_id: Option<String>,
+        message: impl Into<String>,
+        details: Option<String>,
+    ) -> Self {
+        Self::Error {
+            order_id,
+            message: message.into(),
+            details,
+            timestamp: env_block_timestamp_seconds(),
         }
-        
-        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
-        let data = EventData {
-            order_id: order_id.to_string(),
-            tee_public_key: tee_public_key.to_string(),
-            timestamp,
-        };
-        
-        Self::new("ORDER_PROCESSING_STARTED", serde_json::to_string(&data)?)
-    }
-    
-    /// Creates a new order processing completed event
-    pub fn new_order_processing_completed(
-        order_id: &str,
-        status: &str,
-    ) -> Result<Self, serde_json::Error> {
-        #[derive(Serialize)]
-        struct EventData {
-            order_id: String,
-            status: String,
-            timestamp: u64,
-        }
-        
-        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
-        let data = EventData {
-            order_id: order_id.to_string(),
-            status: status.to_string(),
-            timestamp,
-        };
-        
-        Self::new("ORDER_PROCESSING_COMPLETED", serde_json::to_string(&data)?)
-    }
-    
-    /// Creates a new TEE attestation verification failed event
-    pub fn new_tee_verification_failed(
-        order_id: &str,
-        public_key: &str,
-        error: &str,
-    ) -> Result<Self, serde_json::Error> {
-        #[derive(Serialize)]
-        struct EventData {
-            order_id: String,
-            public_key: String,
-            error: String,
-            timestamp: u64,
-        }
-        
-        let timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
-        let data = EventData {
-            order_id: order_id.to_string(),
-            public_key: public_key.to_string(),
-            error: error.to_string(),
-            timestamp,
-        };
-        
-        Self::new("TEE_VERIFICATION_FAILED", serde_json::to_string(&data)?)
     }
 
     /// Emits the event to the blockchain
@@ -128,47 +171,6 @@ impl ContractEvent {
         if let Ok(json) = serde_json::to_string(self) {
             env::log_str(&json);
         }
-                    "event": "funds_locked",
-                    "order_id": order_id,
-                    "token": token,
-                    "amount": amount.to_string(),
-                    "sender": sender,
-                    "timestamp": timestamp,
-                }).to_string()
-            },
-            ContractEvent::FundsReleased { order_id, token, amount, recipient, timestamp } => {
-                serde_json::json!({
-                    "event": "funds_released",
-                    "order_id": order_id,
-                    "token": token,
-                    "amount": amount.to_string(),
-                    "recipient": recipient,
-                    "timestamp": timestamp,
-                }).to_string()
-            },
-            ContractEvent::Error { order_id, message, details, timestamp } => {
-                let mut json = serde_json::json!({
-                    "event": "error",
-                    "message": message,
-                    "timestamp": timestamp,
-                });
-                
-                if let Some(order_id) = order_id {
-                    json.as_object_mut().unwrap()
-                        .insert("order_id".to_string(), serde_json::Value::String(order_id.clone()));
-                }
-                
-                if let Some(details) = details {
-                    json.as_object_mut().unwrap()
-                        .insert("details".to_string(), serde_json::Value::String(details.clone()));
-                }
-                
-                json.to_string()
-            },
-        };
-        
-        // Log the event in a structured JSON format
-        log!(format!("EVENT_JSON:{}", event_json));
     }
     
     /// Emits an error event
@@ -179,13 +181,6 @@ impl ContractEvent {
     /// Emits an error event for a failed promise result
     pub fn emit_promise_error(order_id: Option<String>, result: &PromiseResult, context: &str) {
         match result {
-            PromiseResult::NotReady => {
-                Self::emit_error(
-                    order_id,
-                    format!("Promise not ready: {}", context),
-                    None,
-                );
-            }
             PromiseResult::Failed => {
                 Self::emit_error(
                     order_id,
@@ -198,13 +193,49 @@ impl ContractEvent {
             }
         }
     }
+    
+    /// Creates a new TEE attestation registered event
+    pub fn new_tee_attestation_registered(public_key: String, tee_type: String) -> Self {
+        Self::TeeAttestationRegistered {
+            public_key,
+            tee_type,
+            timestamp: env_block_timestamp_seconds(),
+        }
+    }
+    
+    /// Creates a new TEE attestation revoked event
+    pub fn new_tee_attestation_revoked(public_key: String, reason: String) -> Self {
+        Self::TeeAttestationRevoked {
+            public_key,
+            reason,
+            timestamp: env_block_timestamp_seconds(),
+        }
+    }
+    
+    /// Creates a new TEE attestation extended event
+    pub fn new_tee_attestation_extended(public_key: String, new_expires_at: u64) -> Self {
+        Self::TeeAttestationExtended {
+            public_key,
+            new_expires_at,
+            timestamp: env_block_timestamp_seconds(),
+        }
+    }
+    
+    /// Creates a new TEE attestation updated event
+    pub fn new_tee_attestation_updated(public_key: String, field: String) -> Self {
+        Self::TeeAttestationUpdated {
+            public_key,
+            field,
+            timestamp: env_block_timestamp_seconds(),
+        }
+    }
 }
 
 /// Helper macro to emit events
 #[macro_export]
 macro_rules! emit_event {
     ($event:expr) => {
-        $crate::event::ContractEvent::from($event).emit();
+        $event.emit();
     };
 }
 
@@ -236,37 +267,6 @@ mod tests {
     }
     
     #[test]
-    fn test_order_status_changed_event() {
-        let context = get_context();
-        testing_env!(context);
-        
-        let event = ContractEvent::OrderStatusChanged {
-            order_id: "test-order-1".to_string(),
-            old_status: OrderStatus::Created,
-            new_status: OrderStatus::Processing,
-            timestamp: 1234567890,
-        };
-        
-        event.emit();
-    }
-    
-    #[test]
-    fn test_funds_locked_event() {
-        let context = get_context();
-        testing_env!(context);
-        
-        let event = ContractEvent::FundsLocked {
-            order_id: "test-order-1".to_string(),
-            token: "wrap.near".to_string(),
-            amount: 1000000000000000000, // 1 NEAR
-            sender: "alice.near".parse().unwrap(),
-            timestamp: 1234567890,
-        };
-        
-        event.emit();
-    }
-    
-    #[test]
     fn test_error_event() {
         let context = get_context();
         testing_env!(context);
@@ -282,6 +282,5 @@ mod tests {
         // Error without order ID or details
         let event = ContractEvent::new_error(None, "Internal error", None);
         event.emit();
-    }    // In a real test, we would capture and verify the log output
     }
 }

@@ -1,12 +1,9 @@
 use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
-    collections::UnorderedMap,
+    collections::{UnorderedMap, LookupMap, HashMap},
     env, log, near_bindgen, require,
-    serde::{Deserialize, Serialize},
-    AccountId, Balance, PanicOnDefault, Promise, PromiseResult,
+    AccountId, PanicOnDefault, Promise,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Import our modules
 pub mod event;
@@ -19,7 +16,7 @@ use crate::{
     event::ContractEvent,
     model::order::{CrossChainOrder, OrderStatus},
     service::solver::{OneInchNearSolver, SolverConfig, TokenConfig},
-    tee::TeeAttestation,
+    tee::{TeeAttestation, TeeType},
 };
 
 // Define the contract structure
@@ -74,6 +71,8 @@ impl CrossChainSolverContract {
             solver,
             orders: UnorderedMap::new(b"o".to_vec()),
             config,
+            tee_attestation: None,
+            paused: false,
         }
     }
 
@@ -85,8 +84,9 @@ impl CrossChainSolverContract {
         
         // Verify TEE attestation if required
         if let Some(attestation) = &self.tee_attestation {
+            let current_timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
             require!(
-                attestation.is_valid(),
+                attestation.is_valid(current_timestamp),
                 "TEE attestation is required and must be valid"
             );
         }
@@ -95,24 +95,24 @@ impl CrossChainSolverContract {
         self.orders.insert(&order.id, &order);
         
         // Emit order created event
-        emit_event!(ContractEvent::OrderCreated {
-            order_id: order.id.clone(),
-            source_chain: order.source_chain.clone(),
-            dest_chain: order.dest_chain.clone(),
-            source_token: order.source_token.clone(),
-            dest_token: order.dest_token.clone(),
-            amount: order.source_amount,
-        });
+        emit_event!(ContractEvent::new_order_created(
+            order.id.clone(),
+            order.source_chain.clone(),
+            order.dest_chain.clone(),
+            order.source_token.clone(),
+            order.dest_token.clone(),
+            order.amount
+        ));
         
         log!("Processing order: {}", order.id);
         
         // Process the order asynchronously
         Promise::new(env::current_account_id())
             .function_call(
-                b"process_order_callback".to_vec(),
+                "process_order_callback".to_string(),
                 near_sdk::serde_json::to_vec(&order).expect("Failed to serialize order"),
-                0,
-                env::prepaid_gas() - env::used_gas() - 10_000_000_000_000, // Leave some gas for callback
+                near_sdk::NearToken::from_yoctonear(0),
+                near_sdk::Gas::from_tgas(50), // 50 TGas for callback
             )
     }
     
@@ -138,7 +138,7 @@ impl CrossChainSolverContract {
         
         if let Some(mut order) = self.orders.get(&order_id) {
             if order.status != OrderStatus::Filled && order.status != OrderStatus::Cancelled {
-                let old_status = order.status_to_string(&order.status);
+                let _old_status = order.status_to_string(&order.status);
                 
                 order.update_status(OrderStatus::Cancelled);
                 self.orders.insert(&order_id, &order);
@@ -146,7 +146,8 @@ impl CrossChainSolverContract {
                 // Emit order cancelled event
                 emit_event!(ContractEvent::OrderCancelled {
                     order_id: order_id.clone(),
-                    reason: reason.unwrap_or_else(|| "User requested cancellation".to_string()),
+                    reason: reason.clone().unwrap_or_else(|| "User requested cancellation".to_string()),
+                    timestamp: crate::utils::env_block_timestamp_seconds(),
                 });
                 
                 log!(
@@ -175,21 +176,55 @@ impl CrossChainSolverContract {
     ) {
         self.assert_owner();
         
+        // Store the string representation for the event
+        let tee_type_str = tee_type.clone();
+        
+        // Convert string tee_type to TeeType enum
+        let tee_type_enum = match tee_type.as_str() {
+            "SGX" => TeeType::Sgx,
+            "SEV" => TeeType::Sev,
+            "TrustZone" => TeeType::TrustZone,
+            "AwsNitro" => TeeType::AwsNitro,
+            "AzureAttestation" => TeeType::AzureAttestation,
+            "Asylo" => TeeType::Asylo,
+            other => TeeType::Other(other.to_string()),
+        };
+        
+        let current_timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let expires_at = current_timestamp + expires_in_seconds;
+        
         let attestation = TeeAttestation::new(
-            tee_type,
+            tee_type_enum,
             public_key,
             report,
             signature,
             expires_in_seconds,
+            env::signer_account_id(),
+            "1.0.0".to_string(),
+            Some(HashMap::new())
         );
         
-        self.tee_attestation = Some(attestation.clone());
-        
-        // Emit TEE attestation verified event
-        emit_event!(ContractEvent::TeeAttestationVerified {
-            tee_type: attestation.tee_type,
-            status: "Verified".to_string(),
-        });
+        match attestation {
+            Ok(att) => {
+                self.tee_attestation = Some(att.clone());
+                
+                // Emit TEE attestation verified event
+                emit_event!(ContractEvent::TeeAttestationVerified {
+                    tee_type: tee_type_str,
+                    status: "Verified".to_string(),
+                    timestamp: crate::utils::env_block_timestamp_seconds(),
+                });
+            },
+            Err(err) => {
+                // Emit error event
+                ContractEvent::emit_error(
+                    None,
+                    format!("TEE attestation validation failed: {:?}", err),
+                    None
+                );
+                env::panic_str("TEE attestation validation failed");
+            }
+        }
         
         log!("TEE attestation updated");
     }
@@ -200,8 +235,9 @@ impl CrossChainSolverContract {
         
         if let Some(attestation) = &self.tee_attestation {
             emit_event!(ContractEvent::TeeAttestationVerified {
-                tee_type: attestation.tee_type.clone(),
+                tee_type: attestation.tee_type().to_string(),
                 status: "Removed".to_string(),
+                timestamp: crate::utils::env_block_timestamp_seconds(),
             });
             
             self.tee_attestation = None;
@@ -234,10 +270,8 @@ impl CrossChainSolverContract {
     
     /// Verify the caller is authorized to call this method
     fn assert_authorized(&self) {
-        // In a real implementation, this would check if the caller is authorized
-        // For now, we'll just check that the method is not called directly
-        if env::current_account_id() == env::signer_account_id() {
-            env::panic_str("Method cannot be called directly");
+        if env::signer_account_id() != self.owner_id {
+            env::panic_str("Only the owner can call this method");
         }
     }
     
@@ -254,8 +288,8 @@ impl CrossChainSolverContract {
 mod tests {
     use super::*;
     use near_sdk::test_utils::{accounts, VMContextBuilder};
-    use near_sdk::{testing_env, Balance};
-    use std::str::FromStr;
+    use near_sdk::testing_env;
+
     
     // Helper function to set up the testing environment
     fn get_context() -> VMContextBuilder {
@@ -272,16 +306,16 @@ mod tests {
         CrossChainOrder::new(
             "test-order-1".to_string(),
             "ethereum".to_string(),
-            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(), // ETH
+            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(),
             1000000000000000000u128, // 1 ETH
-            "0x1234567890123456789012345678901234567890".to_string(),
+            "0xSourceAddress".to_string(),
             "near".to_string(),
             "wrap.near".to_string(),
-            1000000000000000000000u128, // 1000 wNEAR
-            "user.near".to_string(),
-            "0x1234abcd".to_string(),
-            1735689600, // Jan 1, 2025
-        )
+            1000000000000000000u128, // 1 wNEAR
+            "alice.near".to_string(),
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(), // hashlock
+            1735689600, // timelock - Jan 1, 2025
+        ).expect("Failed to create test order")
     }
     
     #[test]
@@ -295,19 +329,28 @@ mod tests {
     
     #[test]
     fn test_process_order() {
-        let mut context = get_context();
+        // Set up the test context
+        let mut context = VMContextBuilder::new();
+        context
+            .current_account_id(accounts(0))
+            .signer_account_id(accounts(1))
+            .predecessor_account_id(accounts(1));
+        
+        // Initialize the testing environment with the context
         testing_env!(context.build());
         
+        // Create contract and test order
         let mut contract = CrossChainSolverContract::new(accounts(1));
         let order = create_test_order();
         
-        // Set the predecessor to the owner
-        testing_env!(context.predecessor_account_id(accounts(1)).build());
-        
-        // Process the order
+        // Process the order - this will store the order and return a Promise
         contract.process_order(order.clone());
         
-        // Verify the order was stored
+        // Manually call the callback to simulate the async execution
+        // In a real scenario, this would be called by the Promise
+        contract.process_order_callback(order.clone());
+        
+        // Verify the order status was updated to Filled
         let stored_order = contract.get_order_status(order.id).unwrap();
         assert_eq!(stored_order.status, OrderStatus::Filled);
     }
@@ -315,14 +358,29 @@ mod tests {
     #[test]
     #[should_panic(expected = "Only the owner can call this method")]
     fn test_unauthorized_access() {
-        let context = get_context();
-        testing_env!(context.build());
+        // First, set up the context for contract initialization
+        let mut init_context = VMContextBuilder::new();
+        init_context
+            .current_account_id(accounts(0))
+            .signer_account_id(accounts(1))
+            .predecessor_account_id(accounts(1));
         
+        // Initialize the testing environment with the initial context
+        testing_env!(init_context.build());
+        
+        // Initialize the contract with owner as accounts(1)
         let mut contract = CrossChainSolverContract::new(accounts(1));
         let order = create_test_order();
         
-        // Set the predecessor to a non-owner account
-        testing_env!(context.predecessor_account_id(accounts(2)).build());
+        // Set up a new context with a different predecessor (non-owner)
+        let mut unauthorized_context = VMContextBuilder::new();
+        unauthorized_context
+            .current_account_id(accounts(0))
+            .signer_account_id(accounts(2))
+            .predecessor_account_id(accounts(2));
+        
+        // Update the testing environment with the unauthorized context
+        testing_env!(unauthorized_context.build());
         
         // This should panic with unauthorized access
         contract.process_order(order);

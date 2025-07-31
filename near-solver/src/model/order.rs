@@ -2,17 +2,13 @@ use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
     env, near_bindgen,
     serde::{Deserialize, Serialize},
-    AccountId, Balance, log, Promise, PromiseResult,
+    AccountId, log, PromiseResult,
 };
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::fmt;
 
 // Re-export the event module
 pub use crate::event::ContractEvent;
-
-// Import TEE attestation
-use crate::tee::TeeAttestation;
 
 // Custom error type for validation
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -113,6 +109,14 @@ pub struct CrossChainOrder {
     pub dest_token: String,
     /// Amount of tokens to swap (in the smallest unit)
     pub amount: u128,
+    /// Amount of source tokens (for compatibility)
+    pub source_amount: u128,
+    /// Amount of destination tokens expected
+    pub dest_amount: u128,
+    /// Source address (user who created the order)
+    pub source_address: String,
+    /// Destination address (recipient)
+    pub dest_address: String,
     /// Minimum amount of tokens to receive (slippage protection)
     pub min_amount_out: u128,
     /// Address of the user who created the order
@@ -125,6 +129,8 @@ pub struct CrossChainOrder {
     pub created_at: u64,
     /// When the order expires (UNIX timestamp in seconds)
     pub expires_at: u64,
+    /// Timelock expiration (UNIX timestamp in seconds)
+    pub timelock: u64,
     /// Hash of the secret for the hashlock
     pub hashlock: String,
     /// TEE attestation ID (if required)
@@ -174,41 +180,6 @@ impl CrossChainOrder {
         hashlock: &str,
         timelock: u64,
     ) -> Result<(), ValidationError> {
-        // Check if the order has expired
-        let now = Self::current_timestamp();
-        if timelock <= now {
-            return Err(ValidationError::OrderExpired);
-        }
-        
-        // Validate amounts
-        if source_amount == 0 || dest_amount == 0 {
-            return Err(ValidationError::InvalidAmount);
-        }
-        
-        // Validate hashlock (should be a 64-character hex string)
-        if hashlock.len() != 64 || !hashlock.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ValidationError::InvalidHashlock);
-        }
-        
-        // Validate chains (basic check)
-        if source_chain.is_empty() || dest_chain.is_empty() {
-            return Err(ValidationError::UnsupportedChain);
-        }
-        
-        // Validate tokens (basic check)
-        if source_token.is_empty() || dest_token.is_empty() {
-            return Err(ValidationError::UnsupportedToken);
-        }
-        
-        // Validate addresses
-        if source_address.is_empty() || dest_address.is_empty() {
-            return Err(ValidationError::InvalidRecipient);
-        }
-        
-        // Validate order ID
-        if id.is_empty() || id.len() > 128 {
-            return Err(ValidationError::InvalidOrderId);
-        }
         // Validate order ID
         if id.is_empty() || id.len() > 64 {
             return Err(ValidationError::InvalidOrderId);
@@ -279,44 +250,31 @@ impl CrossChainOrder {
             &hashlock,
             timelock,
         )?;
-        // Validate all parameters
-        Self::validate_params(
-            &id,
-            &source_chain,
-            &source_token,
-            source_amount,
-            &source_address,
-            &dest_chain,
-            &dest_token,
-            dest_amount,
-            &dest_address,
-            &hashlock,
-            timelock,
-        )?;
 
         let now = env::block_timestamp() / 1_000_000; // Convert to seconds
         
         Ok(Self {
             id,
             source_chain,
-            source_token,
-            source_amount,
-            source_address,
             dest_chain,
+            source_token,
             dest_token,
+            amount: source_amount, // Use source_amount as the primary amount
+            source_amount,
             dest_amount,
-            dest_address,
-            hashlock,
-            timelock,
-            status: OrderStatus::Created,
-            created_at: now,
-            updated_at: now,
-            metadata: None,
+            source_address,
+            dest_address: dest_address.clone(),
             min_amount_out: dest_amount, // Default to dest_amount if not specified
             creator: env::predecessor_account_id(),
             recipient: dest_address.clone(),
+            status: OrderStatus::Created,
+            created_at: now,
             expires_at: timelock,
+            timelock,
+            hashlock,
             tee_attestation_id: None,
+            metadata: None,
+            updated_at: now,
         })
     }
 
@@ -326,24 +284,25 @@ impl CrossChainOrder {
             return false; // No change
         }
         
-        let old_status = std::mem::replace(&mut self.status, new_status);
+        let old_status = std::mem::replace(&mut self.status, new_status.clone());
         self.updated_at = Self::current_timestamp();
         
         // Emit status change event
         log!(
             "Order status changed: {} -> {} for order {}",
             self.status_to_string(&old_status),
-            self.status_to_string(&self.status),
+            self.status_to_string(&new_status),
             self.id
         );
         
         // Emit event
-        event::emit_event(ContractEvent::OrderStatusChanged {
+        let event = ContractEvent::OrderStatusChanged {
             order_id: self.id.clone(),
-            old_status,
-            new_status: self.status.clone(),
+            old_status: old_status.clone(),
+            new_status: new_status.clone(),
             timestamp: self.updated_at,
-        });
+        };
+        event.emit();
         
         true
     }
@@ -418,6 +377,11 @@ fn is_valid_near_account(account_id: &str) -> bool {
 }
 
 fn is_valid_token_format(token: &str) -> bool {
+    // Check if it's an Ethereum token address (0x followed by 40 hex chars)
+    if token.starts_with("0x") && token.len() == 42 {
+        return token[2..].chars().all(|c| c.is_ascii_hexdigit());
+    }
+    
     // Check if it's a NEAR token (format: account_id:token_id)
     if token.contains(':') {
         let parts: Vec<&str> = token.split(':').collect();
@@ -455,20 +419,26 @@ mod tests {
         let now = env::block_timestamp() / 1_000_000;
         CrossChainOrder {
             id: "test-order".to_string(),
-            status: OrderStatus::Created,
             source_chain: "ethereum".to_string(),
-            source_token: "0xTokenAddress".to_string(),
-            source_amount: 1000000000000000000, // 1 token with 18 decimals
-            source_address: "0xUserAddress".to_string(),
             dest_chain: "near".to_string(),
+            source_token: "0xTokenAddress".to_string(),
             dest_token: "wrap.near".to_string(),
+            amount: 1000000000000000000, // 1 token with 18 decimals
+            source_amount: 1000000000000000000, // 1 token with 18 decimals
             dest_amount: 1000000000000000000, // 1 token with 24 decimals
+            source_address: "0xUserAddress".to_string(),
             dest_address: "user.near".to_string(),
-            hashlock: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
-            timelock: now + 3600, // 1 hour from now
+            min_amount_out: 950000000000000000, // 95% of dest_amount (slippage protection)
+            creator: "test.near".parse().unwrap(),
+            recipient: "user.near".to_string(),
+            status: OrderStatus::Created,
             created_at: now,
-            updated_at: now,
+            expires_at: now + 3600, // 1 hour from now
+            timelock: now + 3600, // 1 hour from now
+            hashlock: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
+            tee_attestation_id: None,
             metadata: None,
+            updated_at: now,
         }
     }
 
@@ -482,15 +452,15 @@ mod tests {
         let order = CrossChainOrder::new(
             "test-order".to_string(),
             "ethereum".to_string(),
-            "0xTokenAddress".to_string(),
+            "0xA0b86a33E6441c8C06DD2b7c94b7E5c88b5c5c5c".to_string(),
             1000000000000000000, // 1 token with 18 decimals
-            "0xUserAddress".to_string(),
+            "0xB1c96a33E6441c8C06DD2b7c94b7E5c88b5c5c5c".to_string(),
             "near".to_string(),
             "wrap.near".to_string(),
             1000000000000000000, // 1 token with 24 decimals
             "user.near".to_string(),
-            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
-            now + 3600, // 1 hour from now
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
+        now + 3600, // 1 hour from now
         );
         
         assert!(order.is_ok());

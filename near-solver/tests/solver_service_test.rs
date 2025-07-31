@@ -379,15 +379,22 @@ mod tests {
     fn test_salt_generation() {
         let solver = OneInchNearSolver::new("near-testnet".to_string());
         
-        let salt1 = solver.generate_salt();
-        let salt2 = solver.generate_salt();
+        // Generate multiple salts to ensure they're different
+        let mut salts = std::collections::HashSet::new();
+        let count = 10;
         
-        // Salts should be different
-        assert_ne!(salt1, salt2);
+        for _ in 0..count {
+            let salt = solver.generate_salt();
+            assert!(salt.starts_with("0x"), "Salt should start with 0x");
+            assert_eq!(salt.len() > 2, true, "Salt should have content after 0x");
+            salts.insert(salt);
+            
+            // Ensure we have enough entropy by sleeping briefly
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         
-        // Both should start with 0x
-        assert!(salt1.starts_with("0x"));
-        assert!(salt2.starts_with("0x"));
+        // All salts should be unique
+        assert_eq!(salts.len(), count, "All generated salts should be unique");
     }
 
     #[test]
