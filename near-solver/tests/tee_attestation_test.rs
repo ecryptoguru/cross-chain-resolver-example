@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json;
 use sha2::{Digest, Sha256};
-use base64;
+use base64::{Engine as _, engine::general_purpose};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Simplified TEE attestation for testing
@@ -127,7 +127,7 @@ impl TeeAttestation {
         }
         
         // For testing, assume signature is valid if it's base64 encoded
-        base64::decode(&self.signature)
+        general_purpose::STANDARD.decode(&self.signature)
             .map(|_| true)
             .map_err(|_| TeeAttestationError::InvalidSignature)
     }
@@ -177,7 +177,7 @@ impl TeeAttestation {
         }
 
         // For testing, verify that signature is base64 encoded
-        base64::decode(signature)
+        general_purpose::STANDARD.decode(signature)
             .map(|decoded| !decoded.is_empty() && !data.is_empty())
             .map_err(|_| TeeAttestationError::InvalidSignature)
     }
@@ -216,9 +216,9 @@ mod tests {
 
         let tee = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600, // 1 hour
             Some(metadata),
         ).expect("Failed to create TEE attestation");
@@ -238,9 +238,9 @@ mod tests {
     fn test_tee_attestation_expiration() {
         let mut tee = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600, // 1 hour
             None,
         ).expect("Failed to create TEE attestation");
@@ -261,9 +261,9 @@ mod tests {
     fn test_unsupported_tee_type() {
         let result = TeeAttestation::new(
             "unsupported_type".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             None,
         );
@@ -277,8 +277,8 @@ mod tests {
         let result = TeeAttestation::new(
             "sgx".to_string(),
             "".to_string(), // Empty public key
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             None,
         );
@@ -287,9 +287,9 @@ mod tests {
         // Test with empty report
         let result = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_public_key"),
             "".to_string(), // Empty report
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             None,
         );
@@ -298,8 +298,8 @@ mod tests {
         // Test with empty signature
         let result = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
             "".to_string(), // Empty signature
             3600,
             None,
@@ -322,9 +322,9 @@ mod tests {
     fn test_signature_verification() {
         let tee = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             None,
         ).expect("Failed to create TEE attestation");
@@ -335,7 +335,7 @@ mod tests {
 
         // Test data signature verification
         let data = b"test_data";
-        let signature = base64::encode("test_data_signature");
+        let signature = general_purpose::STANDARD.encode("test_data_signature");
         assert!(tee.verify_data_signature(data, &signature).is_ok());
         assert!(tee.verify_data_signature(data, &signature).unwrap());
     }
@@ -351,9 +351,9 @@ mod tests {
 
         let tee = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             Some(metadata),
         ).expect("Failed to create TEE attestation");
@@ -379,9 +379,9 @@ mod tests {
 
         let tee = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             Some(metadata),
         ).expect("Failed to create TEE attestation");
@@ -401,9 +401,9 @@ mod tests {
     fn test_getter_methods() {
         let tee = TeeAttestation::new(
             "sgx".to_string(),
-            base64::encode("test_public_key"),
-            base64::encode("test_report"),
-            base64::encode("test_signature"),
+            general_purpose::STANDARD.encode("test_public_key"),
+            general_purpose::STANDARD.encode("test_report"),
+            general_purpose::STANDARD.encode("test_signature"),
             3600,
             None,
         ).expect("Failed to create TEE attestation");

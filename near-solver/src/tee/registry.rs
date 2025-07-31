@@ -1,16 +1,12 @@
 use near_sdk::{
-    borsh::{self, BorshDeserialize, BorshSerialize},
+    env, near_bindgen, require, AccountId, PanicOnDefault,
     collections::{LookupMap, UnorderedSet},
-    env, near_bindgen, require,
-    AccountId, BorshStorageKey, PanicOnDefault,
+    borsh::{self, BorshDeserialize, BorshSerialize},
 };
+use std::collections::HashMap;
 use crate::{
+    tee::attestation::{TeeAttestation, TeeAttestationError, TeeType, StorageKey},
     event::ContractEvent,
-    tee::{
-        attestation::TeeAttestationError,
-        TeeAttestation, 
-        TeeType,
-    },
 };
 
 // Define a simple error type instead of using Result<T, E> for contract methods
@@ -21,19 +17,7 @@ pub enum TeeRegistryError {
     Unauthorized,
 }
 
-/// Storage keys for the TEE registry
-#[derive(BorshStorageKey, BorshSerialize)]
-pub enum StorageKey {
-    /// Storage key for the attestations map
-    Attestations,
-    /// Storage key for the attestation keys set
-    AttestationKeys,
-    /// Storage key for the owner attestations map
-    OwnerAttestations {
-        /// The account hash used for the storage key
-        account_hash: Vec<u8>,
-    },
-}
+
 
 /// TEE Registry contract state
 #[near_bindgen]
@@ -64,7 +48,7 @@ impl TeeRegistry {
             paused: false,
             attestations: LookupMap::new(StorageKey::Attestations),
             attestation_keys: UnorderedSet::new(StorageKey::AttestationKeys),
-            owner_attestations: LookupMap::new(StorageKey::OwnerAttestations {
+            owner_attestations: LookupMap::new(StorageKey::AttestationByOwner {
                 account_hash: env::sha256(owner_id_clone.as_bytes()),
             }),
         }
@@ -123,12 +107,11 @@ impl TeeRegistry {
     ) -> Result<Result<(), TeeAttestationError>, near_sdk::Abort> {
         self.assert_not_paused();
         
-        let owner_id = env::predecessor_account_id();
-        let current_timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let _owner_id = env::predecessor_account_id();
         
         // Create and validate the attestation
         let attestation = match TeeAttestation::new(
-            tee_type,
+            tee_type.clone(),
             public_key.clone(),
             report,
             signature,
@@ -153,8 +136,8 @@ impl TeeRegistry {
         // Update the owner's attestations
         let signer_id = env::signer_account_id();
         let mut owner_attestations = self.owner_attestations.get(&signer_id).unwrap_or_else(|| {
-            UnorderedSet::new(StorageKey::OwnerAttestations {
-                account_hash: env::sha256(signer_id.as_bytes().as_ref()).to_vec(),
+            UnorderedSet::new(StorageKey::AttestationByOwner {
+                account_hash: env::sha256(signer_id.as_bytes()),
             })
         });
         
@@ -219,8 +202,8 @@ impl TeeRegistry {
     ) {
         self.assert_not_paused();
         
-        let owner_id = env::predecessor_account_id();
-        let current_timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
+        let _owner_id = env::predecessor_account_id(); // Currently unused, kept for future access control
+        let _current_timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
         
         // Get the attestation
         let mut attestation = self
@@ -245,7 +228,7 @@ impl TeeRegistry {
         let event = ContractEvent::new_error(
             None,
             "TEE attestation extended",
-            Some(format!("Public key: {}, Type: {:?}, Owner: {}, Old Expiration: {}, New Expiration: {}", public_key, attestation.tee_type, owner_id, old_expires_at, new_expires_at))
+            Some(format!("Public key: {}, Type: {:?}, Old Expiration: {}, New Expiration: {}", public_key, attestation.tee_type, old_expires_at, new_expires_at))
         );
         event.emit();
         
@@ -315,6 +298,7 @@ impl TeeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use near_sdk::{test_utils::VMContextBuilder, testing_env, VMContext};
     
     fn get_context(is_view: bool) -> VMContext {
@@ -334,7 +318,12 @@ mod tests {
         let mut registry = TeeRegistry::new("owner.testnet".parse().unwrap());
         
         // Test registration
-        let metadata = HashMap::new();
+        let mut metadata: HashMap<String, String> = HashMap::new();
+        // Add required SGX metadata fields
+        metadata.insert("sgx_mr_enclave".to_string(), "test_mr_enclave".to_string());
+        metadata.insert("sgx_mr_signer".to_string(), "test_mr_signer".to_string());
+        metadata.insert("sgx_isv_prod_id".to_string(), "1".to_string());
+        metadata.insert("sgx_isv_svn".to_string(), "1".to_string());
         registry.register_attestation(
             TeeType::Sgx,
             "test_public_key".to_string(),
@@ -360,7 +349,12 @@ mod tests {
         let mut registry = TeeRegistry::new("bob.testnet".parse().unwrap());
         
         // Register an attestation
-        let metadata = HashMap::new();
+        let mut metadata: HashMap<String, String> = HashMap::new();
+        // Add required SGX metadata fields
+        metadata.insert("sgx_mr_enclave".to_string(), "test_mr_enclave".to_string());
+        metadata.insert("sgx_mr_signer".to_string(), "test_mr_signer".to_string());
+        metadata.insert("sgx_isv_prod_id".to_string(), "1".to_string());
+        metadata.insert("sgx_isv_svn".to_string(), "1".to_string());
         registry.register_attestation(
             TeeType::Sgx,
             "test_public_key".to_string(),
@@ -387,7 +381,12 @@ mod tests {
         let initial_expiry = (env::block_timestamp() / 1_000_000_000) + 3600; // 1 hour from now
         
         // Register an attestation
-        let metadata = HashMap::new();
+        let mut metadata: HashMap<String, String> = HashMap::new();
+        // Add required SGX metadata fields
+        metadata.insert("sgx_mr_enclave".to_string(), "test_mr_enclave".to_string());
+        metadata.insert("sgx_mr_signer".to_string(), "test_mr_signer".to_string());
+        metadata.insert("sgx_isv_prod_id".to_string(), "1".to_string());
+        metadata.insert("sgx_isv_svn".to_string(), "1".to_string());
         registry.register_attestation(
             TeeType::Sgx,
             "test_public_key".to_string(),

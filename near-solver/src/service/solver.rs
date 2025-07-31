@@ -163,7 +163,7 @@ impl CrossChainSolver for OneInchNearSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::test_utils::test_env;
+
     use std::str::FromStr;
 
     fn create_test_order() -> CrossChainOrder {
@@ -205,7 +205,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_order() {
         // Setup test environment
-        test_env::setup();
+        let context = near_sdk::test_utils::VMContextBuilder::new().build();
+        near_sdk::testing_env!(context);
         
         let account_id = AccountId::from_str("solver.near").unwrap();
         let config = create_test_config();
@@ -226,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_order() {
         // Setup test environment
-        test_env::setup();
+        let context = near_sdk::test_utils::VMContextBuilder::new().build();
+        near_sdk::testing_env!(context);
         
         let account_id = AccountId::from_str("solver.near").unwrap();
         let config = create_test_config();

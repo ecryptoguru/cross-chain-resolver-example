@@ -150,6 +150,7 @@ impl CrossChainOrder {
     }
     
     /// Creates a new error event
+    #[allow(dead_code)]
     fn emit_error(&self, message: impl Into<String>, details: Option<String>) {
         ContractEvent::emit_error(
             Some(self.id.clone()),
@@ -159,6 +160,7 @@ impl CrossChainOrder {
     }
     
     /// Emits an error event for a failed promise result
+    #[allow(dead_code)]
     fn emit_promise_error(&self, result: &PromiseResult, context: &str) {
         ContractEvent::emit_promise_error(
             Some(self.id.clone()),
@@ -405,7 +407,6 @@ mod tests {
     use super::*;
     use near_sdk::{testing_env, VMContext};
     use near_sdk::test_utils::VMContextBuilder;
-    use std::panic;
 
     fn get_context() -> VMContext {
         VMContextBuilder::new()

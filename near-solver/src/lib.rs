@@ -1,9 +1,10 @@
 use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
-    collections::{UnorderedMap, LookupMap, HashMap},
+    collections::UnorderedMap,
     env, log, near_bindgen, require,
     AccountId, PanicOnDefault, Promise,
 };
+use std::collections::HashMap;
 
 // Import our modules
 pub mod event;
@@ -191,7 +192,7 @@ impl CrossChainSolverContract {
         };
         
         let current_timestamp = env::block_timestamp() / 1_000_000_000; // Convert to seconds
-        let expires_at = current_timestamp + expires_in_seconds;
+        let _expires_at = current_timestamp + expires_in_seconds;
         
         let attestation = TeeAttestation::new(
             tee_type_enum,
@@ -235,7 +236,7 @@ impl CrossChainSolverContract {
         
         if let Some(attestation) = &self.tee_attestation {
             emit_event!(ContractEvent::TeeAttestationVerified {
-                tee_type: attestation.tee_type().to_string(),
+                tee_type: attestation.tee_type.to_string(),
                 status: "Removed".to_string(),
                 timestamp: crate::utils::env_block_timestamp_seconds(),
             });

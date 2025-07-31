@@ -20,8 +20,10 @@ pub use attestation::{
 pub use registry::{
     TeeRegistry,
     TeeRegistryError,
-    StorageKey as TeeRegistryStorageKey,
 };
+
+// Re-export storage key from attestation module
+pub use attestation::StorageKey as TeeRegistryStorageKey;
 
 // Common result type for TEE operations
 pub type TeeResult<T> = Result<T, TeeAttestationError>;

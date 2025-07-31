@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 
@@ -459,7 +458,6 @@ mod tests {
         let mut contract = setup_contract();
 
         // Create an order first
-        let hashlock = "0xabcdef1234567890";
         let preimage = "secret";
         
         // Calculate the correct hashlock for the preimage
