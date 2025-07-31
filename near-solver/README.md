@@ -15,7 +15,6 @@ This is the NEAR-side solver component for the 1inch Fusion+ x NEAR cross-chain 
 - [Rust](https://www.rust-lang.org/tools/install) (latest stable version)
 - [NEAR CLI](https://docs.near.org/tools/near-cli#setup)
 - [cargo-near](https://github.com/near/cargo-near)
-- [Node.js](https://nodejs.org/) (v16+)
 
 ## Project Structure
 
