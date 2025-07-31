@@ -809,6 +809,7 @@ export class NearRelayer {
   }
   
   /**
+
    * Handles the fulfillment of a NEAR escrow (when the secret is revealed)
    */
   private async handleNearFulfillment(

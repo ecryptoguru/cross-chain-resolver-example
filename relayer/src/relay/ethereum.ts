@@ -201,39 +201,109 @@ export class EthereumRelayer {
   }
 
   private setupEventListeners(): void {
-    if (!process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS) {
-      throw new Error('ETHEREUM_ESCROW_FACTORY_ADDRESS is not set in environment variables');
+    if (!process.env.RESOLVER_ADDRESS) {
+      throw new Error('RESOLVER_ADDRESS (bridge contract) is not set in environment variables');
     }
 
-    // Listen for EscrowCreated events
-    this.escrowFactoryContract.on(
-      'EscrowCreated',
+    // Set up bridge contract to listen for cross-chain events
+    const bridgeABI = [
+      'event DepositInitiated(bytes32 indexed depositId, address indexed sender, string nearRecipient, address token, uint256 amount, uint256 fee, uint256 timestamp)',
+      'event MessageSent(bytes32 indexed messageId, bytes32 indexed depositId, address indexed sender, string nearRecipient, uint256 amount, uint256 timestamp)'
+    ];
+    
+    const bridgeContract = new ethers.Contract(
+      process.env.RESOLVER_ADDRESS,
+      bridgeABI,
+      this.signer
+    );
+
+    // Listen for DepositInitiated events from bridge
+    bridgeContract.on(
+      'DepositInitiated',
       (
-        escrowAddress: string,
-        initiator: string,
+        depositId: string,
+        sender: string,
+        nearRecipient: string,
         token: string,
         amount: bigint,
-        targetChain: string,
-        targetAddress: string,
+        fee: bigint,
+        timestamp: bigint,
         event: ethers.Event
       ) => {
       try {
-        logger.info(`New escrow created: ${escrowAddress}`);
+        logger.info(`New deposit initiated: ${depositId}`);
+        logger.info(`  Sender: ${sender}`);
+        logger.info(`  NEAR Recipient: ${nearRecipient}`);
+        logger.info(`  Amount: ${ethers.utils.formatEther(amount)} ETH`);
         
-        // Only process NEAR chain targets for now
-        if (targetChain.toLowerCase() === 'near') {
-          this.handleEthereumToNearSwap(
-            escrowAddress,
-            initiator,
-            token,
-            amount,
-            targetAddress
-          );
-        }
+        // Process the deposit by creating NEAR escrow
+        this.handleEthereumToNearSwap(
+          depositId,
+          sender,
+          token,
+          amount,
+          nearRecipient
+        );
       } catch (error) {
-        logger.error(`Error processing EscrowCreated event: ${error}`);
+        logger.error(`Error processing DepositInitiated event: ${error}`);
       }
     });
+
+    // Listen for MessageSent events from bridge
+    bridgeContract.on(
+      'MessageSent',
+      (
+        messageId: string,
+        depositId: string,
+        sender: string,
+        nearRecipient: string,
+        amount: bigint,
+        timestamp: bigint,
+        event: ethers.Event
+      ) => {
+      try {
+        logger.info(`Cross-chain message sent: ${messageId}`);
+        logger.info(`  Deposit ID: ${depositId}`);
+        logger.info(`  Processing cross-chain relay to NEAR...`);
+        
+        // This confirms the cross-chain message was sent
+        // The actual NEAR escrow creation should be handled by DepositInitiated
+      } catch (error) {
+        logger.error(`Error processing MessageSent event: ${error}`);
+      }
+    });
+
+    // Keep the original EscrowCreated listener for escrow factory events
+    if (process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS) {
+      this.escrowFactoryContract.on(
+        'EscrowCreated',
+        (
+          escrowAddress: string,
+          initiator: string,
+          token: string,
+          amount: bigint,
+          targetChain: string,
+          targetAddress: string,
+          event: ethers.Event
+        ) => {
+        try {
+          logger.info(`New escrow created: ${escrowAddress}`);
+          
+          // Only process NEAR chain targets for now
+          if (targetChain.toLowerCase() === 'near') {
+            this.handleEthereumToNearSwap(
+              escrowAddress,
+              initiator,
+              token,
+              amount,
+              targetAddress
+            );
+          }
+        } catch (error) {
+          logger.error(`Error processing EscrowCreated event: ${error}`);
+        }
+      });
+    }
 
     logger.info('Ethereum event listeners initialized');
   }
@@ -386,7 +456,7 @@ export class EthereumRelayer {
       // 7. Submit the transaction to the NEAR network
       try {
         if (this.nearAccount) {
-          const nearTxResult = await this.nearAccount.functionCall({
+          const nearTxResult = await (this.nearAccount as any).functionCall({
             contractId: process.env.NEAR_ESCROW_CONTRACT || 'escrow-v2.fusionswap.testnet',
             methodName: 'create_swap_order',
             args: {

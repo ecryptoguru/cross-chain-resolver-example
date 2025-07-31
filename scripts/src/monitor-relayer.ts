@@ -61,10 +61,68 @@ let lastProcessedBlock = 0;
 async function checkNearOrderStatus(depositId: string): Promise<void> {
   try {
     console.log('\n🔍 Checking NEAR order status for deposit:', depositId);
-    // This is a placeholder - implement actual NEAR RPC call to check order status
-    console.log('   Implement NEAR RPC call to check order status for:', depositId);
+    
+    const nearRpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.testnet.near.org';
+    const nearEscrowContract = process.env.NEAR_ESCROW_CONTRACT || 'escrow-v2.fusionswap.testnet';
+    
+    // Call NEAR RPC to check escrow status
+    const response = await fetch(nearRpcUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'dontcare',
+        method: 'query',
+        params: {
+          request_type: 'call_function',
+          finality: 'final',
+          account_id: nearEscrowContract,
+          method_name: 'get_escrow_details',
+          args_base64: Buffer.from(JSON.stringify({ escrow_id: depositId })).toString('base64')
+        }
+      })
+    });
+    
+    const result = await response.json() as any;
+    
+    if (result.error) {
+      console.log('   ❌ NEAR RPC Error:', result.error.message);
+      return;
+    }
+    
+    if (result.result && result.result.result) {
+      try {
+        const escrowData = JSON.parse(Buffer.from(result.result.result).toString());
+        console.log('   ✅ NEAR Escrow Found:');
+        console.log('     - Status:', escrowData.status || 'unknown');
+        console.log('     - Amount:', escrowData.amount || 'unknown');
+        console.log('     - Recipient:', escrowData.recipient || 'unknown');
+        console.log('     - Target Escrow:', escrowData.target_escrow || 'none');
+        
+        if (escrowData.status === 'pending') {
+          console.log('   ⏳ Escrow is pending - waiting for Ethereum confirmation');
+        } else if (escrowData.status === 'completed') {
+          console.log('   🎉 Escrow completed successfully!');
+        } else if (escrowData.status === 'error') {
+          console.log('   ❌ Escrow has error status:', escrowData.error || 'unknown error');
+        }
+      } catch (parseError) {
+        console.log('   ❌ Error parsing NEAR escrow data:', parseError);
+        console.log('   Raw result:', Buffer.from(result.result.result).toString());
+      }
+    } else {
+      console.log('   ❌ No escrow found for deposit ID:', depositId);
+      console.log('   This could mean:');
+      console.log('     - Relayer hasn\'t processed the deposit yet');
+      console.log('     - Deposit ID doesn\'t match NEAR escrow ID');
+      console.log('     - NEAR contract call failed');
+    }
+    
   } catch (error) {
     console.error('❌ Error checking NEAR order status:', error);
+    console.log('   Make sure NEAR_RPC_URL and NEAR_ESCROW_CONTRACT are set correctly');
   }
 }
 
@@ -100,16 +158,23 @@ async function performHealthCheck(provider: ethers.Provider, bridgeContract: eth
 }
 
 async function monitorRelayerActivity(): Promise<void> {
-  if (!process.env.SEPOLIA_RPC_URL) {
-    throw new Error('SEPOLIA_RPC_URL environment variable is not set');
+  // Use ETHEREUM_RPC_URL if available, otherwise fall back to SEPOLIA_RPC_URL
+  const rpcUrl = process.env.ETHEREUM_RPC_URL || process.env.SEPOLIA_RPC_URL;
+  if (!rpcUrl) {
+    throw new Error('Neither ETHEREUM_RPC_URL nor SEPOLIA_RPC_URL environment variables are set');
   }
+  // Log the full RPC URL for debugging
+  console.log('\n🔗 Environment Variables:');
+  console.log(`- ETHEREUM_RPC_URL: ${process.env.ETHEREUM_RPC_URL ? 'set' : 'not set'}`);
+  console.log(`- SEPOLIA_RPC_URL: ${process.env.SEPOLIA_RPC_URL ? 'set' : 'not set'}`);
+  console.log(`\n🔗 Using RPC URL: ${rpcUrl}`);
 
   // Clear any existing interval
   if (healthCheckInterval) {
     clearInterval(healthCheckInterval);
   }
 
-  const provider = new ethers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL);
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
   const bridgeContract = new ethers.Contract(
     BRIDGE_ADDRESS,
     BRIDGE_ABI,
@@ -140,11 +205,8 @@ async function monitorRelayerActivity(): Promise<void> {
     monitorRelayerActivity();
   });
   
-  // Set up error handling for the contract
-  bridgeContract.on('error', (error: Error) => {
-    console.error('\n❌ Contract event listener error:', error.message);
-    // Don't exit on contract errors, just log them
-  });
+  // Note: Contract error handling is done through provider error events
+  // Individual contract events don't have error listeners in ethers v6
   
   // Set up health check interval (every 30 seconds)
   healthCheckInterval = setInterval(async () => {
