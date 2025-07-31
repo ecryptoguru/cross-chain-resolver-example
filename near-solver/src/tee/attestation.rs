@@ -1094,13 +1094,13 @@ mod tests {
     #[test]
     fn test_attestation_validation() {
         let mut attestation = create_test_attestation();
+        let current_timestamp = attestation.issued_at + 100;
         
-        // Test valid attestation (skip signature verification for test data)
-        let current_timestamp = attestation.issued_at + 100; // Use a timestamp after issuance
+        // Test valid attestation - skip signature verification since we're testing validation logic
         assert!(attestation.validate(current_timestamp, false).is_ok());
         
         // Test expired attestation
-        let future_timestamp = attestation.expires_at + 100; // After expiration
+        let future_timestamp = attestation.expires_at + 100;
         if let Err(TeeAttestationError::Expired { current, expires_at }) = attestation.validate(future_timestamp, false) {
             assert!(current >= expires_at);
         } else {
