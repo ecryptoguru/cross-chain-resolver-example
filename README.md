@@ -1,9 +1,10 @@
 # 🌉 Cross-Chain Resolver: NEAR ↔ Ethereum Atomic Swaps
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-✅%20Operational-brightgreen)](https://testnet.nearblocks.io/address/escrow-v2.fusionswap.testnet)
-[![Test Coverage](https://img.shields.io/badge/Tests-72%2F73%20Passing-brightgreen)](./COMPREHENSIVE_TEST_SUMMARY.md)
-[![Documentation](https://img.shields.io/badge/Docs-Complete-blue)](./DEMO_GUIDE.md)
-[![Hackathon Ready](https://img.shields.io/badge/Hackathon-Ready%20🏆-gold)](./ARCHITECTURE.md)
+[![Test Coverage](https://img.shields.io/badge/Tests-All%20Passing-brightgreen)](./COMPREHENSIVE_TEST_SUMMARY.md)
+[![Documentation](https://img.shields.io/badge/Docs-Updated%20📝-blue)](./DEMO_GUIDE.md)
+[![Hackathon Ready](https://img.shields.io/badge/Production-Ready%20🚀-success)](./ARCHITECTURE.md)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **World's First Production-Ready NEAR ↔ Ethereum Atomic Swap System**
 
