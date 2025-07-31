@@ -1,0 +1,131 @@
+{
+  "networks": {
+    "sepolia": {
+      "chainId": 11155111,
+      "name": "Sepolia Testnet",
+      "rpcUrl": "https://eth-sepolia.g.alchemy.com/v2/yFzICl29cHfTWhakm7BSV",
+      "explorerUrl": "https://sepolia.etherscan.io",
+      "nativeCurrency": {
+        "name": "Sepolia ETH",
+        "symbol": "ETH",
+        "decimals": 18
+      }
+    },
+    "near-testnet": {
+      "chainId": "testnet",
+      "name": "NEAR Testnet",
+      "rpcUrl": "https://rpc.testnet.near.org",
+      "explorerUrl": "https://explorer.testnet.near.org",
+      "nativeCurrency": {
+        "name": "NEAR",
+        "symbol": "NEAR",
+        "decimals": 24
+      }
+    }
+  },
+  "contracts": {
+    "sepolia": {
+      "NearBridge": {
+        "address": "0x4b0B79ab6534186003fB5EE682D87cbdF865A3f1",
+        "deployedAt": "2025-07-30T09:45:03.617Z",
+        "txHash": "0xff2ba097fc8d9861b05b41e8152732682f24d4917a8c9afbe3c06c442f914e51"
+      },
+      "TestEscrowFactory": {
+        "address": "0x42943188e0Be8674375c0a79b8F22e2a153e2400",
+        "txHash": "0x2e3c3b591961ad5c109cc1301593fe5b78df28dc743ee7c88bf64160ec52d3e2",
+        "deployedAt": "2025-07-30T09:45:17.321Z"
+      },
+      "FeeToken": {
+        "address": "0x00b06667dbAC7113beBEF3726d3Bc3829D6F18a0",
+        "deployedAt": "2025-07-30T09:44:49.925Z",
+        "txHash": "0x8c569700190e857f8a6ad602d2b9289c71ad4e20d586e34576535e71c4c143bb"
+      }
+    },
+    "near-testnet": {
+      "CrossChainSolver": {
+        "accountId": "",
+        "deployedAt": "",
+        "txHash": ""
+      },
+      "EscrowContract": {
+        "accountId": "",
+        "deployedAt": "",
+        "txHash": ""
+      }
+    }
+  },
+  "testWallets": {
+    "ethereum": {
+      "deployer": {
+        "address": "",
+        "privateKey": "cc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad",
+        "balance": "0"
+      },
+      "user1": {
+        "address": "",
+        "privateKey": "",
+        "balance": "0"
+      },
+      "user2": {
+        "address": "",
+        "privateKey": "",
+        "balance": "0"
+      }
+    },
+    "near": {
+      "deployer": {
+        "accountId": "",
+        "privateKey": "",
+        "balance": "0"
+      },
+      "user1": {
+        "accountId": "",
+        "privateKey": "",
+        "balance": "0"
+      },
+      "user2": {
+        "accountId": "",
+        "privateKey": "",
+        "balance": "0"
+      }
+    }
+  },
+  "tokens": {
+    "sepolia": {
+      "WETH": {
+        "address": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+        "symbol": "WETH",
+        "decimals": 18
+      },
+      "USDC": {
+        "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+        "symbol": "USDC",
+        "decimals": 6
+      }
+    },
+    "near-testnet": {
+      "wNEAR": {
+        "address": "wrap.testnet",
+        "symbol": "wNEAR",
+        "decimals": 24
+      },
+      "USDC": {
+        "address": "usdc.fakes.testnet",
+        "symbol": "USDC",
+        "decimals": 6
+      }
+    }
+  },
+  "relayer": {
+    "ethereum": {
+      "blockConfirmations": 3,
+      "pollInterval": 5000,
+      "retryAttempts": 3
+    },
+    "near": {
+      "blockConfirmations": 1,
+      "pollInterval": 2000,
+      "retryAttempts": 3
+    }
+  }
+}

@@ -133,13 +133,13 @@ dist
 cache
 .idea
 
-buildingwith1inch.md
-codereview.md
-fusionplus.md
-requirements.md
-nearprotocol.md
-solver.md
+API_GUIDE.md
+ARCHITECTURE.md
+DEMO_GUIDE.md
+
 
 package-lock.json
-near-contracts/escrow
 lib/contracts/lib
+near-solver/test-standalone/target
+
+

@@ -23,13 +23,17 @@ contract DeployNearBridge is Script {
         // Start broadcasting transactions
         vm.startBroadcast(deployerPrivateKey);
         
-        // Deploy the bridge
+        // Deploy the bridge with all required parameters
         NearBridge bridge = new NearBridge(
-            feeCollector,
-            MIN_DEPOSIT,
-            MAX_DEPOSIT,
-            DISPUTE_PERIOD,
-            BRIDGE_FEE_BPS
+            msg.sender,                 // _owner
+            address(0),                 // _feeToken (address(0) for native token)
+            address(0),                 // _accessToken (optional, set to zero)
+            feeCollector,               // _feeCollector
+            MIN_DEPOSIT,                // _minDeposit
+            MAX_DEPOSIT,                // _maxDeposit
+            DISPUTE_PERIOD,             // _disputePeriod
+            BRIDGE_FEE_BPS,             // _bridgeFeeBps
+            NearBridge.BridgeStatus.ACTIVE // _initialStatus
         );
         
         // Add relayer (deployer is added as relayer in constructor)

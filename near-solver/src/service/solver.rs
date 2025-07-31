@@ -2,9 +2,8 @@ use crate::model::order::{CrossChainOrder, OrderStatus};
 use anyhow::Result;
 use async_trait::async_trait;
 use near_sdk::{
-    json_types::{Base64VecU8, U128},
     serde_json::json,
-    AccountId, Promise,
+    AccountId,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -32,6 +31,7 @@ pub trait CrossChainSolver: Send + Sync {
 }
 
 /// Implementation of the cross-chain solver
+#[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct OneInchNearSolver {
     /// NEAR account ID of the solver
     pub account_id: AccountId,
@@ -42,7 +42,7 @@ pub struct OneInchNearSolver {
 }
 
 /// Configuration for the solver
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct SolverConfig {
     /// Minimum time (in seconds) for order expiration
     pub min_expiration: u64,
@@ -55,7 +55,7 @@ pub struct SolverConfig {
 }
 
 /// Configuration for a supported token
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct TokenConfig {
     /// Minimum amount that can be swapped
     pub min_amount: u128,
@@ -114,7 +114,7 @@ impl OneInchNearSolver {
 
         // TODO: Submit the meta-order to 1inch Fusion+ API
         // For now, we'll just log it
-        log::info!("Generated meta-order: {}", meta_order);
+        near_sdk::log!("Generated meta-order: {}", meta_order);
 
         // Update order status
         if let Some(stored_order) = self.orders.get_mut(&order.id) {
@@ -163,23 +163,23 @@ impl CrossChainSolver for OneInchNearSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::test_utils::test_env;
+
     use std::str::FromStr;
 
     fn create_test_order() -> CrossChainOrder {
         CrossChainOrder::new(
             "test-order-1".to_string(),
             "ethereum".to_string(),
-            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(), // ETH
+            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(),
             1000000000000000000u128, // 1 ETH
-            "0x1234567890123456789012345678901234567890".to_string(),
+            "0xSourceAddress".to_string(),
             "near".to_string(),
             "wrap.near".to_string(),
-            1000000000000000000000u128, // 1000 wNEAR
-            "user.near".to_string(),
-            "0x1234abcd".to_string(),
-            1735689600, // Jan 1, 2025
-        )
+            1000000000000000000u128, // 1 wNEAR
+            "alice.near".to_string(),
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(), // hashlock
+            1735689600, // timelock - Jan 1, 2025
+        ).expect("Failed to create test order")
     }
 
     fn create_test_config() -> SolverConfig {
@@ -205,7 +205,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_order() {
         // Setup test environment
-        test_env::setup();
+        let context = near_sdk::test_utils::VMContextBuilder::new().build();
+        near_sdk::testing_env!(context);
         
         let account_id = AccountId::from_str("solver.near").unwrap();
         let config = create_test_config();
@@ -226,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_order() {
         // Setup test environment
-        test_env::setup();
+        let context = near_sdk::test_utils::VMContextBuilder::new().build();
+        near_sdk::testing_env!(context);
         
         let account_id = AccountId::from_str("solver.near").unwrap();
         let config = create_test_config();

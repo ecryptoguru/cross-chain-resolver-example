@@ -9,11 +9,15 @@
     "deploy:escrow": "ts-node src/deploy-escrow.ts"
   },
   "dependencies": {
-    "ethers": "^6.13.2"
+    "dotenv": "^17.2.1",
+    "ethers": "^6.15.0",
+    "near-api-js": "^6.2.4",
+    "tsx": "^4.20.3"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
+    "@types/node": "^20.19.9",
+    "@types/node-fetch": "^2.6.13",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.9.2"
   }
 }
