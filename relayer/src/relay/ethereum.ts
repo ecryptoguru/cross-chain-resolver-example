@@ -1,6 +1,5 @@
 import { ethers, type Contract, type Signer } from 'ethers';
-// Temporarily stub NEAR Account type until near-api-js import issues are resolved
-type Account = any;
+import { Account } from '@near-js/accounts';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger.js';
@@ -38,8 +37,6 @@ const ResolverABI = [
 ] as const; // Add 'as const' for better type inference
 
 // Type definitions for better type safety
-type BigNumberish = ethers.BigNumberish;
-type BigNumber = ethers.BigNumber;
 
 // Import centralized error handling
 import {
@@ -54,26 +51,21 @@ import {
 
 
 
-// NEAR-specific event interfaces
-interface NearDepositInitiatedEvent {
-  sender: string;
-  nearRecipient: string;
-  amount: BigNumber;
+// NEAR-specific event interfaces - Base interface to reduce duplication
+interface BaseNearEvent {
   secretHash: string;
+  nearRecipient: string;
+  amount: ethers.BigNumber;
+}
+
+interface NearDepositInitiatedEvent extends BaseNearEvent {
+  sender: string;
   timelock: number;
 }
 
-interface NearWithdrawalCompletedEvent {
-  secretHash: string;
-  nearRecipient: string;
-  amount: BigNumber;
-}
+interface NearWithdrawalCompletedEvent extends BaseNearEvent {}
 
-interface NearRefundedEvent {
-  secretHash: string;
-  nearRecipient: string;
-  amount: BigNumber;
-}
+interface NearRefundedEvent extends BaseNearEvent {}
 
 // Cross-chain message interfaces
 interface CrossChainMessage {
@@ -129,6 +121,11 @@ export class EthereumRelayer {
       throw new Error('Signer must be connected to a provider');
     }
 
+    // Validate provider type
+    if (!('send' in signer.provider) || !('getNetwork' in signer.provider)) {
+      throw new Error('Provider must be a JsonRpcProvider or compatible provider');
+    }
+
     this.signer = signer;
     this.provider = signer.provider as ethers.providers.JsonRpcProvider;
     this.nearAccount = nearAccount;
@@ -143,30 +140,18 @@ export class EthereumRelayer {
       throw new Error('RESOLVER_ADDRESS and ESCROW_FACTORY_ADDRESS must be set in environment variables');
     }
     
-    // Type-safe contract instances
+    // Initialize contract instances
     this.resolverContract = new ethers.Contract(
       resolverAddress,
       ResolverABI,
       this.signer
-    ) as ethers.Contract & {
-      on: (eventName: string, listener: (...args: any[]) => void) => ethers.Contract;
-      filters: {
-        NearDepositInitiated: (sender?: string, nearRecipient?: string) => ethers.EventFilter;
-        NearWithdrawalCompleted: (secretHash?: string, nearRecipient?: string) => ethers.EventFilter;
-        NearRefunded: (secretHash?: string, nearRecipient?: string) => ethers.EventFilter;
-      };
-    };
+    );
     
     this.escrowFactoryContract = new ethers.Contract(
       escrowFactoryAddress,
       EscrowFactoryABI,
       this.signer
-    ) as ethers.Contract & {
-      on: (eventName: string, listener: (...args: any[]) => void) => ethers.Contract;
-      filters: {
-        EscrowCreated: (escrow?: string, initiator?: string) => ethers.EventFilter;
-      };
-    };
+    );
   }
 
   async start(): Promise<void> {
@@ -178,15 +163,11 @@ export class EthereumRelayer {
     this.isRunning = true;
     logger.info('Starting Ethereum relayer...');
 
-    // Initial setup and event subscriptions
-    await this.setupEventListeners();
-
     // Load processed messages from storage
     await this.loadProcessedMessages();
-    
-    this.setupEventListeners();
-    
-    logger.info('Ethereum Relayer initialized successfully');
+
+    // Setup event listeners
+    await this.setupEventListeners();
 
     // Start polling for events
     this.pollForEvents();
@@ -246,13 +227,15 @@ export class EthereumRelayer {
         logger.info(`  NEAR Recipient: ${nearRecipient}`);
         logger.info(`  Amount: ${ethers.utils.formatEther(amount)} ETH`);
         
-        // Process the deposit by creating NEAR escrow
-        this.handleEthereumToNearSwap(
+        // Process the deposit by creating NEAR order
+        this.handleDepositInitiated(
           depositId,
           sender,
+          nearRecipient,
           token,
           amount,
-          nearRecipient
+          fee,
+          timestamp
         );
       } catch (error) {
         logger.error(`Error processing DepositInitiated event: ${error}`);
@@ -376,6 +359,85 @@ export class EthereumRelayer {
     } catch (error) {
       logger.error('Error checking for new Ethereum events:', error);
       throw error; // Re-throw to be caught by the caller
+    }
+  }
+
+  /**
+   * Handles DepositInitiated events from the bridge contract
+   */
+  private async handleDepositInitiated(
+    depositId: string,
+    sender: string,
+    nearRecipient: string,
+    token: string,
+    amount: bigint,
+    fee: bigint,
+    timestamp: bigint
+  ): Promise<void> {
+    try {
+      // Input validation
+      if (!this.validateEthereumAddress(sender)) {
+        throw ErrorHandler.createValidationError('sender', sender, 'Invalid Ethereum address format');
+      }
+      
+      if (!this.validateEthereumAddress(token)) {
+        throw ErrorHandler.createValidationError('token', token, 'Invalid Ethereum address format');
+      }
+      
+      if (!this.validateAmount(amount)) {
+        throw ErrorHandler.createValidationError('amount', amount.toString(), 'Must be positive and within reasonable bounds');
+      }
+      
+      if (!this.validateNearAccountId(nearRecipient)) {
+        throw ErrorHandler.createValidationError('nearRecipient', nearRecipient, 'Invalid NEAR account ID format');
+      }
+      
+      logger.info(`Processing deposit to NEAR: ${depositId}`, {
+        sender,
+        nearRecipient,
+        token,
+        amount: amount.toString(),
+        fee: fee.toString(),
+        timestamp: timestamp.toString()
+      });
+      
+      // Generate a secret for the cross-chain swap
+      const secret = ethers.utils.randomBytes(32);
+      const secretHash = ethers.utils.keccak256(secret);
+      const cleanSecretHash = secretHash.startsWith('0x') ? secretHash.slice(2) : secretHash;
+      
+      // Create NEAR escrow order
+      if (this.nearAccount) {
+        const nearTxResult = await this.nearAccount.functionCall({
+          contractId: this.nearEscrowContractId,
+          methodName: 'create_swap_order',
+          args: {
+            recipient: sender, // Ethereum address of the initiator
+            hashlock: cleanSecretHash,
+            timelock_duration: 3600 // 1 hour in seconds
+          },
+          gas: BigInt('300000000000000'), // 300 TGas
+          attachedDeposit: BigInt(ethers.utils.formatUnits(amount, 'wei')) // Convert amount to yoctoNEAR
+        });
+        
+        logger.info(`NEAR escrow order created successfully:`, {
+          depositId,
+          txHash: nearTxResult.transaction.hash,
+          gasUsed: nearTxResult.transaction_outcome.outcome.gas_burnt
+        });
+        
+        // Store the secret for later use (in production, this should be securely stored)
+        logger.info(`Secret for order fulfillment: ${ethers.utils.hexlify(secret)}`);
+        logger.info(`Secret hash: ${cleanSecretHash}`);
+        
+      } else {
+        logger.error('NEAR account not initialized - cannot create swap order');
+        throw new Error('NEAR account not available');
+      }
+      
+    } catch (error: any) {
+      logger.error(`Failed to process deposit ${depositId}:`, error);
+      throw error;
     }
   }
 

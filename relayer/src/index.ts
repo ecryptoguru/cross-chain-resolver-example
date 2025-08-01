@@ -1,7 +1,7 @@
 import * as dotenv from 'dotenv';
 import { ethers, providers, Wallet } from 'ethers';
 import { Account } from '@near-js/accounts';
-import { JsonRpcProvider } from '@near-js/providers';
+import { JsonRpcProvider, Provider } from '@near-js/providers';
 import { KeyPairSigner } from '@near-js/signers';
 import { EthereumRelayer } from './relay/ethereum.js';
 import { NearRelayer } from './relay/near.js';
@@ -40,15 +40,23 @@ async function main() {
     const signer = KeyPairSigner.fromSecretKey(process.env.NEAR_RELAYER_PRIVATE_KEY! as any);
     const provider = new JsonRpcProvider({ url: process.env.NEAR_NODE_URL! });
     
-    // Create NEAR account with proper structure
+    // Create proper NEAR account instance with functionCall method
+    // Use the working pattern from chainSignatureService.ts
+    // Create NEAR Account instance using the correct constructor pattern
+    const account = new Account(
+      process.env.NEAR_RELAYER_ACCOUNT_ID!,
+      provider as unknown as Provider, // Type assertion to handle compatibility
+      signer
+    );
+    
+    // Create wrapper object with expected interface for NEAR relayer compatibility
     const nearAccount = {
-      accountId: process.env.NEAR_RELAYER_ACCOUNT_ID!,
+      ...account,
       connection: {
-        provider,
+        provider: provider as unknown as any,
         signer,
       },
-      provider, // Add provider at top level for compatibility
-      signer,   // Add signer at top level for compatibility
+      functionCall: account.functionCall.bind(account)
     } as any;
 
     logger.info(`Connected to NEAR network: ${process.env.NEAR_NETWORK_ID}`);

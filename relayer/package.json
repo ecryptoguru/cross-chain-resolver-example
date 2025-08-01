@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@near-js/accounts": "^2.2.4",
+    "@near-js/client": "^2.2.4",
     "@near-js/keystores-node": "^2.2.4",
     "@near-js/providers": "^2.2.4",
     "@near-js/signers": "^2.2.4",
