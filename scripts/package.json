@@ -9,7 +9,14 @@
     "deploy:escrow": "ts-node src/deploy-escrow.ts",
     "monitor:enhanced": "ts-node src/enhanced-monitor-relayer.ts",
     "test:eth-to-near:enhanced": "ts-node src/enhanced-eth-to-near-transfer.ts",
-    "test:near-to-eth:enhanced": "ts-node src/enhanced-test-near-to-eth-transfer.ts"
+    "test:near-to-eth:enhanced": "ts-node src/enhanced-test-near-to-eth-transfer.ts",
+    "test:all": "tsx tests/run-all-tests.ts",
+    "test:monitor": "tsx tests/run-all-tests.ts monitor",
+    "test:near-to-eth": "tsx tests/run-all-tests.ts near-to-eth",
+    "test:eth-to-near": "tsx tests/run-all-tests.ts eth-to-near",
+    "test:monitor-unit": "node --test tests/enhanced-monitor-relayer.test.ts",
+    "test:near-to-eth-unit": "node --test tests/enhanced-test-near-to-eth-transfer.test.ts",
+    "test:eth-to-near-unit": "node --test tests/enhanced-eth-to-near-transfer.test.ts"
   },
   "dependencies": {
     "@near-js/accounts": "^1.0.4",
