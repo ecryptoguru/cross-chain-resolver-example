@@ -1,0 +1,30 @@
+{
+  "name": "relayer-tests",
+  "version": "1.0.0",
+  "description": "Comprehensive test suite for cross-chain relayer components",
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test tests/unit/*.test.ts tests/integration/*.test.ts",
+    "test:unit": "tsx --test tests/unit/*.test.ts",
+    "test:integration": "tsx --test tests/integration/*.test.ts",
+    "test:validation": "tsx --test tests/unit/ValidationService.test.ts",
+    "test:storage": "tsx --test tests/unit/StorageService.test.ts",
+    "test:near-relayer": "tsx --test tests/integration/NearRelayer.test.ts",
+    "test:ethereum-relayer": "tsx --test tests/integration/EthereumRelayer.test.ts",
+    "test:coverage": "c8 tsx --test tests/unit/*.test.ts tests/integration/*.test.ts",
+    "test:watch": "tsx --test --watch tests/unit/*.test.ts tests/integration/*.test.ts"
+  },
+  "dependencies": {
+    "ethers": "^5.7.2",
+    "near-api-js": "^2.1.4"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "c8": "^8.0.1",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
