@@ -1,6 +1,6 @@
 import express, { Request, Response, Application, NextFunction } from 'express';
 import http from 'http';
-import { logger } from './utils/logger';
+import { logger } from './utils/logger.js';
 import { Counter, Gauge, collectDefaultMetrics, Registry } from 'prom-client';
 
 declare module 'http' {

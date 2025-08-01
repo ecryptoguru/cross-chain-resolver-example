@@ -1,5 +1,8 @@
 import { ethers, type Contract, type Signer } from 'ethers';
-import type { Account } from 'near-api-js';
+// Temporarily stub NEAR Account type until near-api-js import issues are resolved
+type Account = any;
+import { promises as fs } from 'fs';
+import * as path from 'path';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/common.js';
 
@@ -12,8 +15,9 @@ const EscrowABI = [
 
 declare global {
   // For browser compatibility
-  // eslint-disable-next-line no-var
-  var window: Window & typeof globalThis & { ethereum?: any };
+  interface Window {
+    ethereum?: any;
+  }
   
   // For Node.js environment
   // eslint-disable-next-line no-var
@@ -37,12 +41,18 @@ const ResolverABI = [
 type BigNumberish = ethers.BigNumberish;
 type BigNumber = ethers.BigNumber;
 
-// Extend the Window interface to include ethereum
-declare global {
-  interface Window {
-    ethereum?: any;
-  }
-}
+// Import centralized error handling
+import {
+  RelayerError,
+  ValidationError,
+  SecurityError,
+  NetworkError,
+  ContractError,
+  StorageError,
+  ErrorHandler
+} from '../utils/errors.js';
+
+
 
 // NEAR-specific event interfaces
 interface NearDepositInitiatedEvent {
@@ -172,7 +182,7 @@ export class EthereumRelayer {
     await this.setupEventListeners();
 
     // Load processed messages from storage
-    this.loadProcessedMessages();
+    await this.loadProcessedMessages();
     
     this.setupEventListeners();
     
@@ -379,10 +389,37 @@ export class EthereumRelayer {
     amount: bigint,
     targetNearAccount: string
   ): Promise<void> {
+    // Input validation using centralized error handling
+    if (!this.validateEthereumAddress(escrowAddress)) {
+      throw ErrorHandler.createValidationError('escrowAddress', escrowAddress, 'Invalid Ethereum address format');
+    }
+    
+    if (!this.validateEthereumAddress(initiator)) {
+      throw ErrorHandler.createValidationError('initiator', initiator, 'Invalid Ethereum address format');
+    }
+    
+    if (!this.validateEthereumAddress(tokenAddress)) {
+      throw ErrorHandler.createValidationError('tokenAddress', tokenAddress, 'Invalid Ethereum address format');
+    }
+    
+    if (!this.validateAmount(amount)) {
+      throw ErrorHandler.createValidationError('amount', amount.toString(), 'Must be positive and within reasonable bounds');
+    }
+    
+    if (!this.validateNearAccountId(targetNearAccount)) {
+      throw ErrorHandler.createValidationError('targetNearAccount', targetNearAccount, 'Invalid NEAR account ID format');
+    }
+    
     const escrowId = `eth:${escrowAddress.toLowerCase()}`;
     
     try {
-      logger.info(`Processing Ethereum to NEAR swap: ${escrowId}`);
+      logger.info(`Processing Ethereum to NEAR swap: ${escrowId}`, {
+        escrowAddress,
+        initiator,
+        tokenAddress,
+        amount: amount.toString(),
+        targetNearAccount
+      });
       
       // 1. Get escrow details with proper typing
       const escrow = new ethers.Contract(escrowAddress, EscrowABI, this.provider);
@@ -941,29 +978,94 @@ export class EthereumRelayer {
   }
   
   /**
+   * Validate Ethereum address format
+   */
+  private validateEthereumAddress(address: string): boolean {
+    try {
+      return ethers.utils.isAddress(address);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Validate NEAR account ID format
+   */
+  private validateNearAccountId(accountId: string): boolean {
+    if (!accountId || typeof accountId !== 'string') {
+      return false;
+    }
+    
+    // NEAR account ID validation rules
+    const nearAccountRegex = /^[a-z0-9._-]+$/;
+    return nearAccountRegex.test(accountId) && 
+           accountId.length >= 2 && 
+           accountId.length <= 64 &&
+           !accountId.startsWith('.') &&
+           !accountId.endsWith('.');
+  }
+
+  /**
+   * Validate amount is positive and within reasonable bounds
+   */
+  private validateAmount(amount: bigint): boolean {
+    try {
+      return amount > BigInt(0) && amount <= ethers.utils.parseEther('1000000').toBigInt();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get secure storage path with validation to prevent directory traversal
+   */
+  private getSecureStoragePath(filename: string): string {
+    // Validate filename to prevent directory traversal
+    if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      throw ErrorHandler.createSecurityError('Directory traversal attempt detected', { filename });
+    }
+    
+    // Ensure filename has safe characters only
+    if (!/^[a-zA-Z0-9_.-]+$/.test(filename)) {
+      throw ErrorHandler.createSecurityError('Unsafe characters in filename', { filename });
+    }
+    
+    return path.join(process.cwd(), 'storage', filename);
+  }
+
+  /**
    * Load processed messages from persistent storage
    */
-  private loadProcessedMessages(): void {
+  private async loadProcessedMessages(): Promise<void> {
     try {
       // In a production environment, this would load from a database or file system
-      // For now, we'll use a simple file-based approach
-      const fs = require('fs');
-      const path = require('path');
+      // For now, we'll use a simple file-based approach with proper path validation
+      const storageFile = this.getSecureStoragePath('processed_messages_ethereum.json');
       
-      const storageFile = path.join(process.cwd(), 'processed_messages_ethereum.json');
-      
-      if (fs.existsSync(storageFile)) {
-        const data = fs.readFileSync(storageFile, 'utf8');
+      try {
+        await fs.access(storageFile);
+        const data = await fs.readFile(storageFile, 'utf8');
         const messages = JSON.parse(data);
         
-        // Load messages into the Set
-        messages.forEach((messageId: string) => {
-          this.processedMessages.add(messageId);
+        // Validate that messages is an array
+        if (!Array.isArray(messages)) {
+          throw new Error('Invalid storage format: expected array');
+        }
+        
+        // Load messages into the Set with validation
+        messages.forEach((messageId: unknown) => {
+          if (typeof messageId === 'string' && messageId.trim()) {
+            this.processedMessages.add(messageId);
+          }
         });
         
         logger.info(`Loaded ${messages.length} processed Ethereum messages from storage`);
-      } else {
-        logger.info('No processed Ethereum messages storage file found, starting fresh');
+      } catch (accessError: any) {
+        if (accessError.code === 'ENOENT') {
+          logger.info('No processed Ethereum messages storage file found, starting fresh');
+        } else {
+          throw accessError;
+        }
       }
     } catch (error) {
       logger.error('Failed to load processed Ethereum messages from storage:', error);
@@ -974,20 +1076,35 @@ export class EthereumRelayer {
   /**
    * Save a processed message to persistent storage
    */
-  private saveProcessedMessage(messageId: string): void {
+  private async saveProcessedMessage(messageId: string): Promise<void> {
     try {
-      // In a production environment, this would save to a database
-      // For now, we'll use a simple file-based approach
-      const fs = require('fs');
-      const path = require('path');
+      // Validate messageId
+      if (!messageId || typeof messageId !== 'string' || !messageId.trim()) {
+        throw new Error('Invalid messageId: must be a non-empty string');
+      }
       
-      const storageFile = path.join(process.cwd(), 'processed_messages_ethereum.json');
+      // Add to in-memory set first
+      this.processedMessages.add(messageId.trim());
+      
+      // In a production environment, this would save to a database
+      // For now, we'll use a simple file-based approach with proper validation
+      const storageFile = this.getSecureStoragePath('processed_messages_ethereum.json');
+      
+      // Ensure storage directory exists
+      const storageDir = path.dirname(storageFile);
+      try {
+        await fs.access(storageDir);
+      } catch {
+        await fs.mkdir(storageDir, { recursive: true });
+      }
       
       // Convert Set to Array for JSON serialization
       const messages = Array.from(this.processedMessages);
       
-      // Write to file
-      fs.writeFileSync(storageFile, JSON.stringify(messages, null, 2));
+      // Write to file atomically (write to temp file first, then rename)
+      const tempFile = `${storageFile}.tmp`;
+      await fs.writeFile(tempFile, JSON.stringify(messages, null, 2), 'utf8');
+      await fs.rename(tempFile, storageFile);
       
       logger.debug(`Saved processed Ethereum message ${messageId} to storage`);
     } catch (error) {

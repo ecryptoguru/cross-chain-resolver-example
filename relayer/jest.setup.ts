@@ -1,20 +1,33 @@
 // Import required modules
 import { TextEncoder } from 'util';
+import { jest } from '@jest/globals';
 
 // Add TextEncoder to global scope for tests
 // This is needed for some libraries that use these Web APIs
 global.TextEncoder = TextEncoder;
 
-// Add a simple mock for TextDecoder
+// Type definition for BufferSource
+type BufferSource = ArrayBufferView | ArrayBuffer;
+
+// Create a simple TextDecoder mock
 class TextDecoderMock {
+  constructor(public encoding: string = 'utf-8') {}
+  
   decode(input?: BufferSource | null): string {
     if (!input) return '';
-    const buffer = input instanceof ArrayBuffer 
-      ? new Uint8Array(input)
-      : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-    return Buffer.from(buffer).toString('utf-8');
+    if (input instanceof ArrayBuffer) {
+      return Buffer.from(input).toString('utf-8');
+    }
+    return Buffer.from(
+      input.buffer, 
+      input.byteOffset, 
+      input.byteLength
+    ).toString('utf-8');
   }
 }
+
+// Add TextDecoder to global scope
+global.TextDecoder = TextDecoderMock as any;
 
 global.TextDecoder = TextDecoderMock as any;
 

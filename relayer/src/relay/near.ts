@@ -1,8 +1,17 @@
-import type { Account } from 'near-api-js';
+// Temporarily stub NEAR Account type until near-api-js import issues are resolved
+type Account = any;
 
 import { ethers } from 'ethers';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/common.js';
+import {
+  RelayerError,
+  ValidationError,
+  NetworkError,
+  ContractError,
+  StorageError,
+  ErrorHandler
+} from '../utils/errors.js';
 
 type BigNumberish = ethers.BigNumberish;
 
@@ -140,7 +149,9 @@ export class NearRelayer {
       : pollIntervalMs;
     
     // Load processed messages from persistent storage (if any)
-    this.loadProcessedMessages();
+    // Note: loadProcessedMessages is now async, but constructor can't be async
+    // We'll handle this in the start method instead
+    this.processedMessages = new Set();
   }
 
   async start(): Promise<void> {
@@ -151,6 +162,9 @@ export class NearRelayer {
 
     this.isRunning = true;
     logger.info('Starting NEAR relayer...');
+
+    // Load processed messages from storage
+    await this.loadProcessedMessages();
 
     // Initial setup
     await this.initialize();
@@ -310,12 +324,12 @@ export class NearRelayer {
   /**
    * Load processed messages from persistent storage
    */
-  private loadProcessedMessages(): void {
+  private async loadProcessedMessages(): Promise<void> {
     try {
       // In a production environment, this would load from a database or file system
       // For now, we'll use a simple file-based approach
-      const fs = require('fs');
-      const path = require('path');
+      const fs = await import('fs');
+      const path = await import('path');
       
       const storageFile = path.join(process.cwd(), 'processed_messages.json');
       
@@ -341,12 +355,12 @@ export class NearRelayer {
   /**
    * Save a processed message to persistent storage
    */
-  private saveProcessedMessage(messageId: string): void {
+  private async saveProcessedMessage(messageId: string): Promise<void> {
     try {
       // In a production environment, this would save to a database
       // For now, we'll use a simple file-based approach
-      const fs = require('fs');
-      const path = require('path');
+      const fs = await import('fs');
+      const path = await import('path');
       
       const storageFile = path.join(process.cwd(), 'processed_messages.json');
       
@@ -411,9 +425,11 @@ export class NearRelayer {
       logger.info(`Successfully processed message: ${messageId}`);
       
     } catch (error) {
-      logger.error(`Failed to process message ${messageId}:`, error);
-      // TODO: Implement retry logic with exponential backoff
-      throw error;
+      ErrorHandler.handleAndRethrow(
+        error as Error,
+        `NEAR message processing failed for ${messageId}`,
+        { messageId, messageType: 'NEAR_TO_ETHEREUM' }
+      );
     }
   }
   

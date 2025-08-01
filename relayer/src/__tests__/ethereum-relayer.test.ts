@@ -1,14 +1,9 @@
+import { jest } from '@jest/globals';
 import { ethers } from 'ethers';
-import { EthereumRelayer } from '../relay/ethereum';
-import { logger } from '../utils/logger';
+import { EthereumRelayer } from '../relay/ethereum.js';
 
-// Mock logger to prevent console output during tests
-jest.mock('../utils/logger', () => ({
-  info: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
-  warn: jest.fn(),
-}));
+// Mock the logger module using moduleNameMapper in Jest config
+jest.mock('src/utils/logger');
 
 // Mock ethers provider and signer
 jest.mock('ethers');
@@ -51,7 +46,7 @@ describe('EthereumRelayer', () => {
     } as unknown as jest.Mocked<ethers.Contract>;
 
     // Mock ethers.Contract to return our mock contract
-    (ethers.Contract as jest.Mock).mockImplementation(() => mockContract);
+    jest.spyOn(ethers, 'Contract').mockImplementation(() => mockContract);
 
     // Create the relayer instance
     ethereumRelayer = new EthereumRelayer(

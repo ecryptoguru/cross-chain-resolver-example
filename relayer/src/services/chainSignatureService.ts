@@ -1,174 +1,298 @@
-import { KeyPair, keyStores, connect, utils, transactions } from 'near-api-js';
-import { KeyStore } from 'near-api-js/lib/key_stores';
-import { PublicKey } from 'near-api-js/lib/utils';
-import { KeyPairEd25519 } from 'near-api-js/lib/utils/key_pair';
-import { logger } from '../utils/logger';
-import { sleep } from '../utils/common';
+// Import proper NEAR APIs from @near-js packages
+import { Account, Connection } from '@near-js/accounts';
+import { JsonRpcProvider, Provider } from '@near-js/providers';
+import { KeyPairSigner } from '@near-js/signers';
+import { UnencryptedFileSystemKeyStore } from '@near-js/keystores-node';
+import { KeyPairEd25519, PublicKey, KeyType } from '@near-js/crypto';
+import { homedir } from 'os';
+import path from 'path';
+import { logger } from '../utils/logger.js';
+import { sleep } from '../utils/common.js';
+import type { KeyStore as NearKeyStore } from '@near-js/keystores';
+import type { KeyPair } from '@near-js/crypto';
+import {
+  RelayerError,
+  ValidationError,
+  SecurityError,
+  NetworkError,
+  ContractError,
+  StorageError,
+  ConfigurationError,
+  ErrorHandler
+} from '../utils/errors.js';
+
+// Type definitions for better type safety
+interface NearConnection {
+  provider: JsonRpcProvider;
+  signer: KeyPairSigner;
+  account: Account;
+}
+
+// Constants
+const DEFAULT_KEY_STORE_PATH = path.join(homedir(), '.near-credentials');
+const NETWORK_ID = process.env.NEAR_NETWORK_ID || 'testnet';
+const NODE_URL = process.env.NEAR_NODE_URL || 'https://rpc.testnet.near.org';
+
+// Helper function to convert string to Uint8Array
+function stringToUint8Array(str: string): Uint8Array {
+  return new TextEncoder().encode(str);
+}
+
+// Helper function to convert Uint8Array to hex string
+function uint8ArrayToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
 
 /**
  * Service for handling NEAR Chain Signatures
  * This service provides secure transaction signing capabilities using NEAR's Chain Signatures
  */
 export class ChainSignatureService {
-  private keyStore: KeyStore;
+  private keyStore: UnencryptedFileSystemKeyStore;
   private keyPair: KeyPairEd25519 | null = null;
   private accountId: string;
   private networkId: string;
   private nodeUrl: string;
+  private connection: NearConnection | null = null;
   private isInitialized = false;
+  private provider: JsonRpcProvider;
 
   /**
    * Create a new ChainSignatureService instance
-   * @param config Configuration for the service
+   * @param accountId NEAR account ID to use for signing
+   * @param keyStorePath Optional path to the key store directory
+   * @param nodeUrl Optional custom NEAR RPC node URL
    */
-  constructor(config: {
-    accountId: string;
-    networkId: string;
-    nodeUrl: string;
-    keyStore?: KeyStore;
-  }) {
-    this.accountId = config.accountId;
-    this.networkId = config.networkId;
-    this.nodeUrl = config.nodeUrl;
-    this.keyStore = config.keyStore || new keyStores.InMemoryKeyStore();
+  constructor(
+    accountId: string, 
+    keyStorePath: string = DEFAULT_KEY_STORE_PATH,
+    nodeUrl: string = NODE_URL
+  ) {
+    this.accountId = accountId;
+    this.networkId = NETWORK_ID;
+    this.nodeUrl = nodeUrl;
+    this.provider = new JsonRpcProvider({ url: nodeUrl });
+    this.keyStore = new UnencryptedFileSystemKeyStore(keyStorePath);
   }
 
   /**
-   * Initialize the service
-   * This should be called before any other methods
+   * Initialize the service by loading the key pair and setting up the connection
    */
-  public async initialize(): Promise<void> {
-    if (this.isInitialized) {
-      return;
-    }
+  async initialize(): Promise<void> {
+    if (this.isInitialized) return;
 
     try {
-      // Load or create key pair
-      const keyPair = await this.getOrCreateKeyPair();
-      this.keyPair = keyPair as KeyPairEd25519;
+      // Load the key pair
+      this.keyPair = await this.loadKeyPair();
       
-      // Store the key pair if it was just created
-      if (!(await this.keyStore.getKey(this.networkId, this.accountId))) {
-        await this.keyStore.setKey(this.networkId, this.accountId, this.keyPair);
-      }
+      // Create a signer with the loaded key pair
+      const signer = new KeyPairSigner(this.keyPair);
+      
+      // Create a new Account instance with the account ID, provider, and signer
+      // Use type assertion to handle JsonRpcProvider to Provider compatibility
+      const account = new Account(
+        this.accountId,
+        this.provider as unknown as Provider, // Type assertion to handle compatibility
+        signer
+      );
+      
+      // Set up the connection
+      this.connection = {
+        provider: this.provider,
+        signer,
+        account
+      };
 
       this.isInitialized = true;
       logger.info('ChainSignatureService initialized successfully');
-    } catch (error) {
-      logger.error('Failed to initialize ChainSignatureService:', error);
-      throw error;
+    } catch (error: unknown) {
+      const errorMessage = `Failed to initialize ChainSignatureService: ${error instanceof Error ? error.message : String(error)}`;
+      logger.error(errorMessage, { error });
+      throw new Error(errorMessage);
     }
   }
 
   /**
-   * Get or create a key pair for the account
-   * @private
+   * Load the key pair from the key store or create a new one if it doesn't exist
+   * @returns The loaded or created key pair
    */
-  private async getOrCreateKeyPair(): Promise<KeyPair> {
+  private async loadKeyPair(): Promise<KeyPairEd25519> {
     try {
-      // Try to load existing key pair
-      const existingKey = await this.keyStore.getKey(this.networkId, this.accountId);
-      if (existingKey) {
-        return existingKey;
+      // Try to load the key pair from the key store
+      const keyData = await this.keyStore.getKey(this.networkId, this.accountId);
+      
+      if (keyData) {
+        // The key store returns a KeyPair instance, so we can cast it directly
+        return keyData as KeyPairEd25519;
       }
 
-      // Generate a new key pair if none exists
-      logger.info('No existing key found, generating new key pair');
-      const keyPair = KeyPair.fromRandom('ed25519');
-      return keyPair;
+      // If no key pair exists, create a new one
+      const newKeyPair = KeyPairEd25519.fromRandom();
+      
+      // Store the new key pair
+      await this.keyStore.setKey(
+        this.networkId, 
+        this.accountId, 
+        newKeyPair
+      );
+      
+      return newKeyPair;
     } catch (error) {
-      logger.error('Error getting or creating key pair:', error);
-      throw error;
+      const errorMsg = `Failed to load or create key pair: ${error instanceof Error ? error.message : String(error)}`;
+      logger.error(errorMsg);
+      throw new Error(errorMsg);
     }
   }
 
   /**
-   * Sign a message using the account's private key
-   * @param message Message to sign (as a string or Uint8Array)
-   * @returns Signature as a base58-encoded string
+   * Sign a message with the account's private key
+   * @param message The message to sign
+   * @returns The signature as a hex string
    */
-  public async signMessage(message: string | Uint8Array): Promise<string> {
+  public async signMessage(message: string): Promise<string> {
     if (!this.isInitialized) {
       throw new Error('ChainSignatureService not initialized');
     }
 
     try {
-      const messageBytes = typeof message === 'string' 
-        ? new TextEncoder().encode(message) 
-        : message;
+      if (!this.keyPair) {
+        throw new Error('No key pair available for signing');
+      }
+
+      // Convert the message to bytes
+      const messageBytes = stringToUint8Array(message);
       
-      // Sign the message using the key pair
-      const signature = this.keyPair!.sign(messageBytes);
+      // Sign the message
+      const signature = this.keyPair.sign(messageBytes);
       
-      // Return the signature as a base58-encoded string
-      return utils.serialize.base_encode(signature.signature);
+      // Convert the signature to a hex string
+      return uint8ArrayToHex(signature.signature);
     } catch (error) {
-      logger.error('Error signing message:', error);
-      throw error;
+      const errorMsg = `Failed to sign message: ${error instanceof Error ? error.message : String(error)}`;
+      logger.error(errorMsg);
+      throw new Error(errorMsg);
     }
   }
 
   /**
    * Verify a signature for a message
-   * @param message Original message that was signed
-   * @param signature Signature to verify (as a base58-encoded string)
-   * @param publicKey Public key to verify against (as a base58-encoded string)
-   * @returns boolean indicating if the signature is valid
+   * @param message The message that was signed
+   * @param signature The signature to verify (as a hex string)
+   * @param publicKey The public key to use for verification (optional, uses account's key if not provided)
+   * @returns True if the signature is valid, false otherwise
    */
   public async verifySignature(
-    message: string | Uint8Array,
+    message: string,
     signature: string,
-    publicKey: string
+    publicKey?: string
   ): Promise<boolean> {
-    try {
-      const messageBytes = typeof message === 'string' 
-        ? new TextEncoder().encode(message) 
-        : message;
-      
-      const publicKeyObj = PublicKey.fromString(publicKey);
-      const signatureBytes = utils.serialize.base_decode(signature);
-      
-      return publicKeyObj.verify(messageBytes, signatureBytes);
-    } catch (error) {
-      logger.error('Error verifying signature:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Sign a NEAR transaction
-   * @param transaction Transaction to sign
-   * @returns Signed transaction
-   */
-  public async signTransaction(transaction: any): Promise<Uint8Array> {
     if (!this.isInitialized) {
       throw new Error('ChainSignatureService not initialized');
     }
 
     try {
-      // Connect to the NEAR network
-      const near = await connect({
-        networkId: this.networkId,
-        nodeUrl: this.nodeUrl,
-        keyStore: this.keyStore,
-        headers: {}
-      });
+      if (!this.keyPair && !publicKey) {
+        throw new Error('No key pair available for verification and no public key provided');
+      }
 
-      // Get the account
-      const account = await near.account(this.accountId);
+      // Convert the message to bytes
+      const messageBytes = stringToUint8Array(message);
+      
+      // Convert the signature from hex to bytes
+      const signatureBytes = new Uint8Array(
+        signature.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
+      );
+      
+      // Create a public key instance
+      let pubKey: PublicKey;
+      if (publicKey) {
+        // If public key is provided, parse it (it might be in 'ed25519:...' format)
+        const pubKeyStr = publicKey.startsWith('ed25519:') 
+          ? publicKey.substring(8) // Remove 'ed25519:' prefix
+          : publicKey;
+        pubKey = PublicKey.fromString(pubKeyStr);
+      } else if (this.keyPair) {
+        // Use the key pair's public key if no public key is provided
+        pubKey = this.keyPair.getPublicKey();
+      } else {
+        throw new Error('No public key available for verification');
+      }
+      
+      // Verify the signature
+      const isValid = pubKey.verify(messageBytes, signatureBytes);
+      
+      if (!isValid) {
+        logger.warn('Signature verification failed', { 
+          message: message,
+          signature: signature,
+          publicKey: pubKey.toString()
+        });
+      }
+      
+      return isValid;
+    } catch (error) {
+      const errorMsg = `Failed to verify signature: ${error instanceof Error ? error.message : String(error)}`;
+      logger.error(errorMsg, { error });
+      return false;
+    }
+  }
+
+  /**
+   * Sign a transaction with the account's private key
+   * @param txData The transaction data to sign
+   * @returns Signed transaction signature
+   */
+  public async signTransaction(txData: {
+    receiverId: string;
+    actions: any[];
+    blockHash: string;
+  }): Promise<Uint8Array> {
+    if (!this.isInitialized) {
+      throw new Error('ChainSignatureService not initialized');
+    }
+
+    if (!this.connection) {
+      throw new Error('No active connection');
+    }
+
+    if (!this.keyPair) {
+      throw new Error('No key pair available for signing');
+    }
+
+    try {
+      const { account } = this.connection;
+      
+      // Get the public key for the account
+      const publicKey = this.keyPair.getPublicKey();
       
       // Get the access key for the account
-      const accessKey = await account.findAccessKey();
+      const accessKey = await account.getAccessKey(publicKey);
+      
+      if (!accessKey) {
+        throw new Error(`No access key found for ${this.accountId}`);
+      }
+
+      // Convert nonce to number if it's a bigint
+      const nonce = typeof accessKey.nonce === 'bigint' 
+        ? accessKey.nonce + BigInt(1)
+        : BigInt((accessKey.nonce as number) + 1);
+
+      // Create a transaction hash to sign
+      const transaction = {
+        signerId: this.accountId,
+        publicKey,
+        nonce,
+        receiverId: txData.receiverId,
+        actions: txData.actions,
+        blockHash: txData.blockHash
+      };
       
       // Sign the transaction
-      const signedTx = await account.signTransaction({
-        ...transaction,
-        signerId: this.accountId,
-        nonce: accessKey.nonce + 1,
-        blockHash: utils.serialize.base_decode(transaction.blockHash)
-      });
-
-      return signedTx[1];
+      const message = new TextEncoder().encode(JSON.stringify(transaction));
+      const signature = await this.keyPair.sign(message);
+      
+      // Return the signature bytes
+      return signature.signature;
     } catch (error) {
       logger.error('Error signing transaction:', error);
       throw error;
@@ -231,28 +355,24 @@ export class ChainSignatureService {
     }
     return this.keyPair.getPublicKey().toString();
   }
-}
 
-/**
- * Factory function to create and initialize a ChainSignatureService instance
- * @param config Configuration for the service
- * @returns Initialized ChainSignatureService instance
- */
-export async function createChainSignatureService(
-  config: {
+  /**
+   * Create a new instance of the NEAR relayer
+   * @param config Configuration for the relayer
+   * @returns A new instance of the NEAR relayer
+   */
+  public static async create(config: {
     accountId: string;
     networkId?: string;
     nodeUrl?: string;
-    keyStore?: KeyStore;
+    keyStorePath?: string;
+  }): Promise<ChainSignatureService> {
+    const relayer = new ChainSignatureService(
+      config.accountId,
+      config.keyStorePath,
+      config.nodeUrl
+    );
+    await relayer.initialize();
+    return relayer;
   }
-): Promise<ChainSignatureService> {
-  const service = new ChainSignatureService({
-    accountId: config.accountId,
-    networkId: config.networkId || 'testnet', // Default to testnet
-    nodeUrl: config.nodeUrl || 'https://rpc.testnet.near.org', // Default testnet RPC
-    keyStore: config.keyStore
-  });
-  
-  await service.initialize();
-  return service;
 }

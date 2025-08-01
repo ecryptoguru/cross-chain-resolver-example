@@ -3,7 +3,7 @@
     "target": "es2020",
     "module": "Node16",
     "moduleResolution": "node16",
-    "lib": ["es2020"],
+    "lib": ["es2020", "dom"],
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
@@ -19,7 +19,8 @@
     "typeRoots": [
       "./node_modules/@types",
       "./src/types"
-    ]
+    ],
+    "isolatedModules": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules"]

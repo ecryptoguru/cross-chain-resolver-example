@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+import * as dotenv from 'dotenv';
 import { ethers, providers, Wallet } from 'ethers';
 import { Account } from '@near-js/accounts';
 import { JsonRpcProvider } from '@near-js/providers';

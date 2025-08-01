@@ -1,6 +1,6 @@
-import winston from 'winston';
+import * as winston from 'winston';
 import 'winston-daily-rotate-file';
-import path from 'path';
+import * as path from 'path';
 
 const { combine, timestamp, printf, colorize, align } = winston.format;
 
@@ -90,8 +90,7 @@ const logger = winston.createLogger({
 });
 
 // Create logs directory if it doesn't exist
-import fs from 'fs';
-import path from 'path';
+import * as fs from 'fs';
 
 const logsDir = path.join(process.cwd(), 'logs');
 if (!fs.existsSync(logsDir)) {

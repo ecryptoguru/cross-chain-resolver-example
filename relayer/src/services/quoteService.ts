@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
-import { logger } from '../utils/logger';
-import { sleep } from '../utils/common';
+import { logger } from '../utils/logger.js';
+import { sleep } from '../utils/common.js';
 
 // Type definitions for 1inch Fusion+ API responses
 interface TokenInfo {
@@ -39,7 +39,7 @@ interface OrderResponse {
  * Service for handling quote listening and meta-order generation
  */
 export class QuoteService {
-  private readonly provider: ethers.Provider;
+  private readonly provider: ethers.providers.Provider;
   private isRunning = false;
   private pollInterval: number;
   private pollTimer: NodeJS.Timeout | null = null;
@@ -48,7 +48,7 @@ export class QuoteService {
   // Event emitters for different quote events
   private readonly eventEmitter = new EventEmitter();
   
-  constructor(provider: ethers.Provider) {
+  constructor(provider: ethers.providers.Provider) {
     if (!provider) {
       throw new Error('Provider is required');
     }

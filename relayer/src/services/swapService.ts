@@ -1,13 +1,13 @@
 import { ethers } from 'ethers';
-import { logger } from '../utils/logger';
-import { sleep } from '../utils/common';
-import { QuoteService } from './quoteService';
+import { logger } from '../utils/logger.js';
+import { sleep } from '../utils/common.js';
+import { QuoteService } from './quoteService.js';
 
 /**
  * Service for handling cross-chain swaps between Ethereum and NEAR
  */
 export class SwapService {
-  private readonly provider: ethers.Provider;
+  private readonly provider: ethers.providers.Provider;
   private readonly quoteService: QuoteService;
   private isRunning = false;
   
@@ -15,7 +15,7 @@ export class SwapService {
   private readonly nearChainId = 397; // NEAR chain ID
   private readonly nearTokenAddress = '0x85F17Cf997934a597031b2E18a9aB6ebD4B9f6a4'; // NEAR token address on Ethereum
   
-  constructor(provider: ethers.Provider) {
+  constructor(provider: ethers.providers.Provider) {
     if (!provider) {
       throw new Error('Provider is required');
     }
