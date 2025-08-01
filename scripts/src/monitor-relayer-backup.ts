@@ -73,7 +73,7 @@ function getBridgeAddress(): string {
 // Contract address from environment variable
 const BRIDGE_ADDRESS = getBridgeAddress();
 
-// Global variables for monitoring
+// Global variables for reconnection
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 let healthCheckInterval: NodeJS.Timeout;
@@ -92,7 +92,6 @@ const activeTransfers = new Map<string, {
   status: 'initiated' | 'processing' | 'completed' | 'failed';
 }>();
 
-// Check NEAR order status for Ethereum→NEAR transfers
 async function checkNearOrderStatus(depositId: string): Promise<void> {
   try {
     console.log('\n🔍 Checking NEAR order status for deposit:', depositId);
@@ -100,9 +99,12 @@ async function checkNearOrderStatus(depositId: string): Promise<void> {
     const nearRpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.testnet.near.org';
     const nearEscrowContract = process.env.NEAR_ESCROW_CONTRACT || 'escrow-v2.fusionswap.testnet';
     
+    // Call NEAR RPC to check escrow status
     const response = await fetch(nearRpcUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 'dontcare',
@@ -158,7 +160,7 @@ async function checkNearOrderStatus(depositId: string): Promise<void> {
   }
 }
 
-// Check NEAR swap order status by order ID for NEAR→Ethereum transfers
+// Check NEAR swap order status by order ID
 async function checkNearSwapOrderStatus(orderId: string): Promise<NearOrderStatus | null> {
   try {
     console.log('\n🔍 Checking NEAR swap order status for order:', orderId);
@@ -166,9 +168,12 @@ async function checkNearSwapOrderStatus(orderId: string): Promise<NearOrderStatu
     const nearRpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.testnet.near.org';
     const nearEscrowContract = process.env.NEAR_ESCROW_CONTRACT || 'escrow-v2.fusionswap.testnet';
     
+    // Call NEAR RPC to check swap order details
     const response = await fetch(nearRpcUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 'dontcare',
@@ -279,6 +284,7 @@ async function monitorNearSwapOrders(): Promise<void> {
 // Poll NEAR blocks for relevant transactions
 async function pollNearBlocks(nearRpcUrl: string, nearEscrowContract: string): Promise<void> {
   try {
+    // Get current block height
     const statusResponse = await fetch(nearRpcUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -295,12 +301,8 @@ async function pollNearBlocks(nearRpcUrl: string, nearEscrowContract: string): P
     
     const currentBlock = statusResult.result.sync_info.latest_block_height;
     
-    // Process new blocks (limit to avoid overwhelming)
-    const maxBlocksToProcess = Math.min(5, currentBlock - lastProcessedNearBlock);
-    for (let i = 0; i < maxBlocksToProcess; i++) {
-      const blockHeight = lastProcessedNearBlock + 1 + i;
-      if (blockHeight > currentBlock) break;
-      
+    // Process new blocks
+    for (let blockHeight = lastProcessedNearBlock + 1; blockHeight <= currentBlock; blockHeight++) {
       try {
         await processNearBlock(nearRpcUrl, nearEscrowContract, blockHeight);
       } catch (error) {
@@ -369,7 +371,8 @@ async function processNearBlock(nearRpcUrl: string, nearEscrowContract: string, 
     } catch (chunkError) {
       // Chunk missing errors are common on NEAR testnet
       if (chunkError instanceof Error && chunkError.message.includes('Chunk Missing')) {
-        continue; // Silently skip missing chunks
+        // Silently skip missing chunks
+        continue;
       }
       throw chunkError;
     }
@@ -408,6 +411,7 @@ async function processNearTransaction(nearRpcUrl: string, txHash: string, nearEs
           console.log('  Amount (NEAR):', (parseFloat(amountYocto) / Math.pow(10, 24)).toFixed(6), 'NEAR');
           console.log('  Recipient:', recipient);
           console.log('  Transaction Hash:', txHash);
+          console.log('  Block Height:', transaction.transaction.block_hash);
           console.log('  ⏳ Relayer should process this for Ethereum withdrawal...');
           
           // Track this transfer
@@ -439,7 +443,6 @@ async function processNearTransaction(nearRpcUrl: string, txHash: string, nearEs
   }
 }
 
-// Perform comprehensive health check
 async function performHealthCheck(provider: ethers.Provider, bridgeContract: ethers.Contract): Promise<void> {
   try {
     const currentBlock = await provider.getBlockNumber();
@@ -513,59 +516,60 @@ async function performHealthCheck(provider: ethers.Provider, bridgeContract: eth
   }
 }
 
-// Main monitoring function
 async function monitorRelayerActivity(): Promise<void> {
+  // Use ETHEREUM_RPC_URL if available, otherwise fall back to SEPOLIA_RPC_URL
   const rpcUrl = process.env.ETHEREUM_RPC_URL || process.env.SEPOLIA_RPC_URL;
   if (!rpcUrl) {
     throw new Error('Neither ETHEREUM_RPC_URL nor SEPOLIA_RPC_URL environment variables are set');
-  }
 
-  console.log('\n📊 Starting Cross-Chain Relayer Monitor...');
-  console.log('=====================================');
-  console.log('RPC URL:', rpcUrl);
-  console.log('Bridge Address:', BRIDGE_ADDRESS);
-  
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const bridgeContract = new ethers.Contract(BRIDGE_ADDRESS, BRIDGE_ABI, provider);
-  
-  // Start NEAR monitoring alongside Ethereum monitoring
-  console.log('\n🌐 Initializing bidirectional monitoring...');
-  console.log('  - Ethereum→NEAR transfers: Bridge contract events');
-  console.log('  - NEAR→Ethereum transfers: NEAR swap order creation');
-  
-  // Start NEAR monitoring
-  monitorNearSwapOrders().catch(error => {
-    console.error('❌ Error starting NEAR monitoring:', error);
-  });
+    // Process chunks in the block
+    for (const chunk of block.chunks) {
+      if (chunk.tx_root === '11111111111111111111111111111111') continue; // Empty chunk
 
+      try {
+        const chunkResponse = await fetch(nearRpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'dontcare',
+            method: 'chunk',
+            params: { chunk_id: chunk.chunk_hash }
+          })
   console.log('\n👂 Listening for events... (Press Ctrl+C to stop)');
 
   // Set up error handling for the provider
-  provider.on('error', (error) => {
-    console.error('\n❌ Provider error:', error);
-    reconnectAttempts++;
-    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      console.log(`🔄 Attempting to reconnect... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-      setTimeout(() => {
-        provider.emit('reconnect');
-      }, 5000);
-    } else {
-      console.error('❌ Max reconnection attempts reached. Exiting...');
+  provider.on('error', async (error) => {
+    console.error('\n❌ Provider error:', error.message);
+    
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.error(`\n❌ Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Please check your connection.`);
       process.exit(1);
     }
+    
+    reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff, max 30s
+    
+    console.log(`\n🔄 Attempting to reconnect in ${delay/1000} seconds... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+    
+    await new Promise(resolve => setTimeout(resolve, delay));
+    monitorRelayerActivity();
   });
-
-  // Set up health check interval
+  
+  // Note: Contract error handling is done through provider error events
+  // Individual contract events don't have error listeners in ethers v6
+  
+  // Set up health check interval (every 30 seconds)
   healthCheckInterval = setInterval(async () => {
     try {
       await performHealthCheck(provider, bridgeContract);
     } catch (error) {
-      console.error('❌ Health check failed:', error);
+      console.error('❌ Health check failed, attempting to reconnect...');
       provider.emit('error', error);
     }
-  }, 30000); // Every 30 seconds
-
-  // Listen for Ethereum→NEAR events
+  }, 30000);
+  
+  // Set up event listeners with proper types
   bridgeContract.on('DepositInitiated', (
     depositId: string,
     sender: string,
@@ -584,8 +588,8 @@ async function monitorRelayerActivity(): Promise<void> {
       fee,
       timestamp
     };
-
-    console.log('\n🔄 ETHEREUM→NEAR DEPOSIT');
+    
+    console.log('\n🔥 RELAYER DETECTED: New ETH Deposit');
     console.log('  Deposit ID:', event.depositId);
     console.log('  Sender:', event.sender);
     console.log('  NEAR Recipient:', event.nearRecipient);
@@ -593,14 +597,6 @@ async function monitorRelayerActivity(): Promise<void> {
     console.log('  Fee:', ethers.formatEther(event.fee), 'ETH');
     console.log('  Timestamp:', new Date(Number(event.timestamp) * 1000).toISOString());
     console.log('  ⏳ Relayer should create NEAR order...');
-
-    // Track this transfer
-    activeTransfers.set(event.depositId, {
-      type: 'eth-to-near',
-      startTime: Date.now(),
-      depositId: event.depositId,
-      status: 'initiated'
-    });
   });
 
   bridgeContract.on('MessageSent', (
@@ -628,21 +624,42 @@ async function monitorRelayerActivity(): Promise<void> {
       console.log('  NEAR Recipient:', event.recipient);
       console.log('  Amount:', ethers.formatEther(event.amount), 'ETH');
       console.log('  Timestamp:', new Date(Number(event.timestamp) * 1000).toISOString());
-      console.log('  ⏳ Relayer should be processing cross-chain relay to NEAR...');
       
-      // Update transfer status
-      const transfer = activeTransfers.get(depositId);
-      if (transfer) {
-        transfer.status = 'processing';
-      }
+      // Add more context about the event
+      console.log('\n🔍 Additional Context:');
+      console.log('  - Bridge Contract:', BRIDGE_ADDRESS);
+      console.log('  - NEAR Escrow Contract:', 'escrow-v2.fusionswap.testnet');
+      console.log('  - Current Block:', 'Querying...');
+      
+      // Get current block number for reference
+      provider.getBlockNumber()
+        .then(blockNumber => {
+          console.log('  - Current Block:', blockNumber);
+          console.log('  - Blocks since event:', blockNumber - Number(timestamp));
+        })
+        .catch(err => {
+          console.error('  ❌ Error getting block number:', err.message);
+        });
+      
+      console.log('\n⏳ Relayer should be processing cross-chain relay to NEAR...');
       
       // Verify NEAR order creation after a short delay
       setTimeout(() => {
         checkNearOrderStatus(depositId).catch(console.error);
       }, 5000);
       
+      console.log('   Checking NEAR escrow contract for order status...');
+      
     } catch (error) {
       console.error('\n❌ Error processing MessageSent event:', error);
+      console.error('Event args:', {
+        messageId,
+        depositId,
+        sender,
+        nearRecipient,
+        amount: amount.toString(),
+        timestamp: timestamp.toString()
+      });
     }
   });
 
@@ -665,23 +682,16 @@ async function monitorRelayerActivity(): Promise<void> {
     console.log('  Amount:', ethers.formatEther(event.amount), 'ETH');
     console.log('  Timestamp:', new Date(Number(event.timestamp) * 1000).toISOString());
     console.log('  🎉 Relayer successfully completed cross-chain swap!');
-
-    // Update transfer status
-    const transfer = activeTransfers.get(depositId);
-    if (transfer) {
-      transfer.status = 'completed';
-    }
   });
 
   // Update last processed block when new blocks are received
-  provider.on('block', (blockNumber: number) => {
+  provider.on('block', (blockNumber) => {
     lastProcessedBlock = blockNumber;
   });
 
   // Handle process termination
   const cleanup = () => {
     console.log('\n👋 Stopping relayer monitor...');
-    nearMonitoringActive = false;
     if (healthCheckInterval) {
       clearInterval(healthCheckInterval);
     }

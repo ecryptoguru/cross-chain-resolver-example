@@ -3,30 +3,49 @@
 import { ethers } from 'ethers';
 import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
+import { KeyPairSigner } from '@near-js/signers';
+import { JsonRpcProvider } from '@near-js/providers';
+import { Account } from '@near-js/accounts';
 
 // Load environment variables
-dotenv.config();
+dotenv.config({ path: '../../.env' });
 
 // Configuration interface
 interface Config {
-  rpcUrl: string;
-  privateKey: string;
+  // Ethereum config
+  ethereumRpcUrl: string;
+  ethereumPrivateKey: string;
   nearBridgeAddress: string;
+  
+  // NEAR config
+  nearNodeUrl: string;
+  nearNetworkId: string;
+  nearAccountId: string;
+  nearPrivateKey: string;
   nearEscrowContractId: string;
-  nearRecipient: string;
+  
+  // Transfer config
   ethRecipient: string;
   transferAmount: string; // in NEAR
   timelock: number; // in seconds
 }
 
 const config: Config = {
-  rpcUrl: process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/ad6681211fac49cf88b2fae20294fbc1',
-  privateKey: process.env.PRIVATE_KEY || '',
-  nearBridgeAddress: process.env.NEAR_BRIDGE || '0x4A75BC3F96554949D40d2B9fA02c070d8ae12881',
+  // Ethereum configuration
+  ethereumRpcUrl: process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/yFzICl29cHfTWhakm7BSV',
+  ethereumPrivateKey: process.env.PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY || '',
+  nearBridgeAddress: process.env.RESOLVER_ADDRESS || '0x4A75BC3F96554949D40d2B9fA02c070d8ae12881',
+  
+  // NEAR configuration
+  nearNodeUrl: process.env.NEAR_NODE_URL || 'https://rpc.testnet.near.org',
+  nearNetworkId: process.env.NEAR_NETWORK_ID || 'testnet',
+  nearAccountId: process.env.NEAR_RELAYER_ACCOUNT_ID || 'fusionswap.testnet',
+  nearPrivateKey: process.env.NEAR_PRIVATE_KEY || process.env.NEAR_RELAYER_PRIVATE_KEY || '',
   nearEscrowContractId: process.env.NEAR_ESCROW_CONTRACT_ID || 'escrow-v2.fusionswap.testnet',
-  nearRecipient: process.env.NEAR_RECIPIENT || 'test.testnet',
+  
+  // Transfer configuration
   ethRecipient: process.env.ETH_RECIPIENT || '0xf387229980fFCC03300f10aa229b9A2be5ab1D40',
-  transferAmount: '0.1', // 0.1 NEAR
+  transferAmount: '0.01', // 0.01 NEAR (matching our previous test amounts)
   timelock: 3600 // 1 hour
 };
 
@@ -44,103 +63,140 @@ async function main() {
 
   try {
     // Initialize Ethereum connection
-    const provider = new ethers.JsonRpcProvider(config.rpcUrl);
-    const signer = new ethers.Wallet(config.privateKey, provider);
-    const network = await provider.getNetwork();
-    const signerAddress = await signer.getAddress();
-    const balance = await provider.getBalance(signerAddress);
+    const ethereumProvider = new ethers.JsonRpcProvider(config.ethereumRpcUrl);
+    const ethereumSigner = new ethers.Wallet(config.ethereumPrivateKey, ethereumProvider);
+    const network = await ethereumProvider.getNetwork();
+    const signerAddress = await ethereumSigner.getAddress();
+    const balance = await ethereumProvider.getBalance(signerAddress);
 
-    console.log(`🔗 Connected to network: ${network.chainId}`);
-    console.log(`👤 Signer address: ${signerAddress}`);
+    console.log(`🔗 Connected to Ethereum network: ${network.chainId}`);
+    console.log(`👤 Ethereum signer address: ${signerAddress}`);
     console.log(`💰 ETH Balance: ${ethers.formatEther(balance)} ETH`);
     console.log(`🌉 NearBridge address: ${config.nearBridgeAddress}`);
+    
+    // Initialize NEAR connection
+    const nearSigner = KeyPairSigner.fromSecretKey(config.nearPrivateKey as any);
+    const nearProvider = new JsonRpcProvider({ url: config.nearNodeUrl });
+    const nearAccount = new Account(config.nearAccountId, nearProvider as any, nearSigner);
+    
+    console.log(`🔗 Connected to NEAR network: ${config.nearNetworkId}`);
+    console.log(`👤 NEAR account ID: ${config.nearAccountId}`);
     console.log(`🏦 NEAR Escrow contract: ${config.nearEscrowContractId}`);
     console.log(`🎯 ETH recipient: ${config.ethRecipient}`);
 
     // Generate secret and hash for atomic swap
     const secret = '0x' + crypto.randomBytes(32).toString('hex');
     const secretHash = ethers.keccak256(ethers.toUtf8Bytes(secret));
+    const cleanSecretHash = secretHash.replace('0x', '');
     const timelock = Math.floor(Date.now() / 1000) + config.timelock;
 
     console.log(`\n🔑 Generated secret and hash:`);
     console.log(`   Secret: ${secret}`);
     console.log(`   Hash:    ${secretHash}`);
+    console.log(`   Clean Hash: ${cleanSecretHash}`);
     console.log(`   Timelock: ${new Date(timelock * 1000).toISOString()}`);
 
-    // Step 1: Create a swap order on NEAR (simulated)
+    // Step 1: Create a real swap order on NEAR
     console.log(`\n💰 Creating NEAR swap order...`);
     console.log(`   Amount: ${config.transferAmount} NEAR`);
     console.log(`   Recipient: ${config.ethRecipient}`);
-    console.log(`   Hashlock: ${secretHash}`);
+    console.log(`   Hashlock: ${cleanSecretHash}`);
     console.log(`   Timelock: ${config.timelock} seconds`);
 
-    // In a real implementation, this would call the NEAR contract
-    const orderId = `order_${Date.now()}`;
-    console.log(`✅ Simulated NEAR order created: ${orderId}`);
-
-    // Step 2: Simulate relayer processing (in real scenario, relayer would detect the NEAR order)
-    console.log(`\n🔄 Waiting for relayer to process NEAR order...`);
-    console.log(`   Relayer should detect the order and create an Ethereum deposit`);
+    // Create real NEAR swap order
+    const transferAmountYocto = ethers.parseUnits(config.transferAmount, 24).toString(); // Convert NEAR to yoctoNEAR
     
-    // For testing, we'll simulate finding an existing deposit that matches our test
-    // In production, the relayer would create this deposit based on the NEAR order
-    console.log(`   Checking for existing deposits in bridge contract...`);
-
-    const bridgeContract = new ethers.Contract(config.nearBridgeAddress, NEAR_BRIDGE_ABI, signer);
-
-    // Step 3: Test withdrawal completion (simulate having a deposit to withdraw)
-    console.log(`\n🏦 Testing withdrawal completion flow...`);
+    console.log(`   Converting ${config.transferAmount} NEAR to ${transferAmountYocto} yoctoNEAR`);
     
-    // For demonstration, let's check if there are any existing deposits we can work with
-    // In a real scenario, the relayer would have created a deposit based on the NEAR order
+    const nearTxResult = await nearAccount.functionCall({
+      contractId: config.nearEscrowContractId,
+      methodName: 'create_swap_order',
+      args: {
+        recipient: config.ethRecipient,
+        hashlock: cleanSecretHash,
+        timelock_duration: config.timelock
+      },
+      gas: BigInt('300000000000000'), // 300 TGas
+      attachedDeposit: BigInt(transferAmountYocto) // Attach the NEAR amount
+    });
     
-    try {
-      // Generate a test deposit ID (in real scenario, this would come from relayer)
-      const testDepositId = ethers.keccak256(ethers.toUtf8Bytes(`test_deposit_${Date.now()}`));
-      console.log(`   Test deposit ID: ${testDepositId}`);
-
-      // Try to get deposit info (this will likely fail since we don't have a real deposit)
-      try {
-        const depositInfo = await bridgeContract.deposits(testDepositId);
-        console.log(`   Deposit info:`, depositInfo);
-        
-        if (depositInfo.depositor !== ethers.ZeroAddress) {
-          console.log(`✅ Found existing deposit, attempting withdrawal...`);
-          
-          // Attempt to complete withdrawal with our secret
-          const signatures: string[] = []; // In real scenario, would have relayer signatures
-          
-          const tx = await bridgeContract.completeWithdrawal(
-            testDepositId,
-            config.ethRecipient,
-            secret,
-            signatures
-          );
-          
-          console.log(`⏳ Withdrawal transaction sent: ${tx.hash}`);
-          const receipt = await tx.wait();
-          console.log(`✅ Withdrawal completed in block ${receipt?.blockNumber}`);
-          
-          // Parse withdrawal events
-          await parseWithdrawalEvents(receipt, bridgeContract);
-          
-        } else {
-          console.log(`ℹ️ No existing deposit found for test ID`);
+    console.log(`✅ NEAR swap order created successfully!`);
+    console.log(`   Transaction hash: ${nearTxResult.transaction.hash}`);
+    console.log(`   Gas used: ${nearTxResult.transaction_outcome.outcome.gas_burnt}`);
+    
+    // Extract order ID from logs
+    let orderId = '';
+    if (nearTxResult.receipts_outcome) {
+      for (const receipt of nearTxResult.receipts_outcome) {
+        for (const log of receipt.outcome.logs) {
+          console.log(`   Log: ${log}`);
+          const orderMatch = log.match(/Created swap order (\w+)/);
+          if (orderMatch) {
+            orderId = orderMatch[1];
+          }
         }
-      } catch (depositError) {
-        console.log(`ℹ️ No deposit found for test ID (expected for new test)`);
       }
-
-    } catch (error) {
-      console.log(`ℹ️ Withdrawal test skipped - no suitable deposits available`);
-      console.log(`   In a real scenario, the relayer would create deposits based on NEAR orders`);
     }
+    
+    console.log(`   Order ID: ${orderId || 'order_' + Date.now()}`);
+    const finalOrderId = orderId || 'order_' + Date.now();
 
-    // Step 4: Validate relayer logs and cross-chain message processing
-    console.log(`\n📊 Validating cross-chain flow...`);
-    await validateRelayerProcessing(orderId, secretHash);
+    // Step 2: Wait for relayer to process NEAR order
+    console.log(`\n🔄 Waiting for relayer to process NEAR order...`);
+    console.log(`   Relayer should detect the NEAR order: ${finalOrderId}`);
+    console.log(`   Expected relayer actions:`);
+    console.log(`     1. Detect NEAR swap order creation`);
+    console.log(`     2. Validate order parameters and amount`);
+    console.log(`     3. Create corresponding Ethereum withdrawal/deposit`);
+    console.log(`     4. Process cross-chain message`);
+    
+    // Give relayer time to process
+    console.log(`   Waiting 10 seconds for relayer processing...`);
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    
+    // Step 3: Initialize bridge contract for monitoring
+    const bridgeContract = new ethers.Contract(config.nearBridgeAddress, NEAR_BRIDGE_ABI, ethereumSigner);
+    
+    console.log(`\n🔍 Checking bridge contract for related deposits...`);
+    
+    // Step 4: Monitor for withdrawal events
+    console.log(`\n📄 Monitoring for withdrawal events...`);
+    console.log(`   Listening for WithdrawalCompleted events...`);
+    
+    // Set up event listener for a short period
+    let eventDetected = false;
+    const eventPromise = new Promise((resolve) => {
+      const filter = bridgeContract.filters.WithdrawalCompleted();
+      bridgeContract.on(filter, (depositId, recipient, amount, timestamp, event) => {
+        console.log(`\n✅ WithdrawalCompleted event detected!`);
+        console.log(`   Deposit ID: ${depositId}`);
+        console.log(`   Recipient: ${recipient}`);
+        console.log(`   Amount: ${ethers.formatEther(amount)} ETH`);
+        console.log(`   Timestamp: ${new Date(Number(timestamp) * 1000).toISOString()}`);
+        eventDetected = true;
+        resolve(event);
+      });
+      
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        if (!eventDetected) {
+          console.log(`   No withdrawal events detected within 30 seconds`);
+          console.log(`   This is expected if relayer hasn't processed the NEAR order yet`);
+        }
+        resolve(null);
+      }, 30000);
+    });
+    
+    await eventPromise;
+    
+    // Clean up event listeners
+    bridgeContract.removeAllListeners();
 
-    // Step 5: Test claim functionality
+    // Step 5: Validate relayer processing
+    console.log(`\n🔍 Validating relayer processing...`);
+    await validateRelayerProcessing(finalOrderId, secretHash);
+
+    // Step 6: Test claim functionality (if applicable)
     console.log(`\n🎁 Testing claim functionality...`);
     await testClaimFunctionality(bridgeContract, secret);
 

@@ -240,6 +240,7 @@ export class NearRelayer {
     }
     
     try {
+      logger.info(`🔍 Processing NEAR block ${blockHeight}`);
       logger.debug(`Processing NEAR block ${blockHeight}`);
       
       // Get the block and its receipts
@@ -314,10 +315,190 @@ export class NearRelayer {
 
   private async processTransaction(transaction: any): Promise<void> {
     try {
-      // Process the transaction
-      // ...
+      // Debug: Log all transactions to see what we're getting
+      logger.debug(`🔍 Checking transaction: ${transaction.hash}`);
+      logger.debug(`   Signer: ${transaction.signer_id}`);
+      logger.debug(`   Receiver: ${transaction.receiver_id}`);
+      logger.debug(`   Expected receiver: ${this.nearEscrowContractId}`);
+      
+      // Check if this transaction is to our NEAR escrow contract
+      // We need to check receiver_id (destination) not signer_id (sender)
+      if (transaction.receiver_id !== this.nearEscrowContractId) {
+        logger.debug(`   ❌ Skipping - not to our contract`);
+        return; // Not a transaction to our contract
+      }
+      
+      logger.info(`✅ Processing NEAR transaction to our contract: ${transaction.hash}`);
+      logger.info(`   From: ${transaction.signer_id} To: ${transaction.receiver_id}`);
+      logger.info(`   Expected contract: ${this.nearEscrowContractId}`);
+      
+      logger.info(`🔍 Processing NEAR transaction: ${transaction.hash}`);
+      
+      // Get transaction status to check for successful execution and logs
+      const txStatus = await this.nearAccount.connection.provider.txStatus(
+        transaction.hash, 
+        transaction.signer_id
+      );
+      
+      if (!txStatus.receipts_outcome) {
+        logger.warn(`No receipts found for transaction ${transaction.hash}`);
+        return;
+      }
+      
+      // Process each receipt to look for swap order creation
+      for (const receipt of txStatus.receipts_outcome) {
+        if (receipt.outcome.logs && receipt.outcome.logs.length > 0) {
+          for (const log of receipt.outcome.logs) {
+            await this.processNearLog(log, transaction.hash);
+          }
+        }
+      }
+      
     } catch (error) {
       logger.error(`Error processing transaction ${transaction.hash}:`, error);
+    }
+  }
+  
+  /**
+   * Process NEAR contract logs to detect swap order creation
+   */
+  private async processNearLog(log: string, txHash: string): Promise<void> {
+    try {
+      // Look for swap order creation logs
+      const swapOrderMatch = log.match(/Created swap order (\w+) for (\d+) yoctoNEAR to recipient (.+)/);
+      
+      if (swapOrderMatch) {
+        const [, orderId, amountYocto, recipient] = swapOrderMatch;
+        
+        logger.info(`🔥 NEAR SWAP ORDER DETECTED!`);
+        logger.info(`  Order ID: ${orderId}`);
+        logger.info(`  Amount: ${amountYocto} yoctoNEAR`);
+        logger.info(`  Recipient: ${recipient}`);
+        logger.info(`  Transaction: ${txHash}`);
+        
+        // Convert yoctoNEAR to ETH equivalent (1:1 for testnet)
+        const amountNear = parseFloat(amountYocto) / Math.pow(10, 24);
+        const amountEth = ethers.utils.parseEther(amountNear.toString());
+        
+        logger.info(`  Converted amount: ${amountNear} NEAR = ${ethers.utils.formatEther(amountEth)} ETH`);
+        
+        // Get the full order details from NEAR contract
+        const orderDetails = await this.getNearOrderDetails(orderId);
+        
+        if (orderDetails) {
+          // Process the NEAR→Ethereum withdrawal
+          await this.processNearToEthereumWithdrawal({
+            orderId,
+            amount: BigInt(amountEth.toString()), // Convert BigNumber to bigint
+            recipient,
+            hashlock: orderDetails.hashlock,
+            timelock: orderDetails.timelock,
+            txHash
+          });
+        }
+      }
+      
+    } catch (error) {
+      logger.error(`Error processing NEAR log:`, error);
+    }
+  }
+  
+  /**
+   * Get NEAR order details from the contract
+   */
+  private async getNearOrderDetails(orderId: string): Promise<any> {
+    try {
+      // Query the NEAR contract for order details
+      const result = await (this.nearAccount as any).viewFunction({
+        contractId: this.nearEscrowContractId,
+        methodName: 'get_order',
+        args: { order_id: orderId }
+      });
+      
+      if (result) {
+        logger.info(`Retrieved NEAR order details for ${orderId}:`, result);
+        return result;
+      } else {
+        logger.warn(`No order details found for ${orderId}`);
+        return null;
+      }
+      
+    } catch (error) {
+      logger.error(`Failed to get NEAR order details for ${orderId}:`, error);
+      return null;
+    }
+  }
+  
+  /**
+   * Process NEAR→Ethereum withdrawal by creating corresponding Ethereum deposit
+   */
+  private async processNearToEthereumWithdrawal(params: {
+    orderId: string;
+    amount: bigint;
+    recipient: string;
+    hashlock: string;
+    timelock: number;
+    txHash: string;
+  }): Promise<void> {
+    try {
+      logger.info(`🌉 Processing NEAR→Ethereum withdrawal:`);
+      logger.info(`  Order ID: ${params.orderId}`);
+      logger.info(`  Amount: ${ethers.utils.formatEther(params.amount)} ETH`);
+      logger.info(`  Recipient: ${params.recipient}`);
+      logger.info(`  Hashlock: ${params.hashlock}`);
+      logger.info(`  NEAR Tx: ${params.txHash}`);
+      
+      // Create Ethereum withdrawal by sending ETH directly to recipient
+      logger.info(`💰 Sending ETH withdrawal to recipient...`);
+      
+      try {
+        // Validate recipient address
+        if (!ethers.utils.isAddress(params.recipient)) {
+          throw new Error(`Invalid recipient address: ${params.recipient}`);
+        }
+        
+        // Check if we have enough ETH balance
+        const balance = await this.ethereumSigner.getBalance();
+        const gasBuffer = ethers.utils.parseEther('0.001');
+        const requiredAmount = BigInt(params.amount.toString()) + BigInt(gasBuffer.toString()); // Add gas buffer
+        
+        if (balance.lt(ethers.BigNumber.from(requiredAmount.toString()))) {
+          throw new Error(`Insufficient ETH balance. Required: ${ethers.utils.formatEther(requiredAmount.toString())}, Available: ${ethers.utils.formatEther(balance)}`);
+        }
+        
+        // Send ETH to recipient
+        const tx = await this.ethereumSigner.sendTransaction({
+          to: params.recipient,
+          value: params.amount,
+          gasLimit: 21000 // Standard ETH transfer gas limit
+        });
+        
+        logger.info(`📤 Sent withdrawal transaction: ${tx.hash}`);
+        
+        // Wait for confirmation
+        const receipt = await tx.wait();
+        
+        if (receipt.status === 1) {
+          logger.info(`✅ NEAR→Ethereum withdrawal completed successfully!`);
+          logger.info(`   Sent ${ethers.utils.formatEther(params.amount)} ETH to ${params.recipient}`);
+          logger.info(`   Transaction hash: ${receipt.transactionHash}`);
+          logger.info(`   Block number: ${receipt.blockNumber}`);
+          
+          // TODO: Emit WithdrawalCompleted event on bridge contract
+          // This would require calling the bridge contract to emit the proper event
+          
+        } else {
+          throw new Error(`Transaction failed with status: ${receipt.status}`);
+        }
+        
+      } catch (ethError) {
+        logger.error(`❌ Failed to send Ethereum withdrawal:`, ethError);
+        throw ethError;
+      }
+      
+    } catch (error) {
+      logger.error(`Failed to process NEAR→Ethereum withdrawal:`, error);
+      throw error;
     }
   }
 
