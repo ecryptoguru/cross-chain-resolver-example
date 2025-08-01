@@ -6,13 +6,20 @@
   "scripts": {
     "build": "tsc",
     "deploy:near-bridge": "ts-node src/deploy-near-bridge.ts",
-    "deploy:escrow": "ts-node src/deploy-escrow.ts"
+    "deploy:escrow": "ts-node src/deploy-escrow.ts",
+    "monitor:enhanced": "ts-node src/enhanced-monitor-relayer.ts",
+    "test:eth-to-near:enhanced": "ts-node src/enhanced-eth-to-near-transfer.ts",
+    "test:near-to-eth:enhanced": "ts-node src/enhanced-test-near-to-eth-transfer.ts"
   },
   "dependencies": {
+    "@near-js/accounts": "^1.0.4",
+    "@near-js/providers": "^0.2.2",
+    "@near-js/signers": "^0.1.2",
     "dotenv": "^17.2.1",
     "ethers": "^6.15.0",
     "near-api-js": "^6.2.4",
-    "tsx": "^4.20.3"
+    "tsx": "^4.20.3",
+    "winston": "^3.11.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.9",

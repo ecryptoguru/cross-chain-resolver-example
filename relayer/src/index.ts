@@ -3,8 +3,8 @@ import { ethers, providers, Wallet } from 'ethers';
 import { Account } from '@near-js/accounts';
 import { JsonRpcProvider, Provider } from '@near-js/providers';
 import { KeyPairSigner } from '@near-js/signers';
-import { EthereumRelayer } from './relay/ethereum.js';
-import { NearRelayer } from './relay/near.js';
+import { EthereumRelayer } from './relay/EthereumRelayer.js';
+import { NearRelayer } from './relay/NearRelayer.js';
 import { logger } from './utils/logger.js';
 
 // Load environment variables
@@ -62,14 +62,26 @@ async function main() {
     logger.info(`Connected to NEAR network: ${process.env.NEAR_NETWORK_ID}`);
     logger.info(`NEAR account ID: ${nearAccount.accountId}`);
 
-    // Initialize relayers with proper type casting and required parameters
-    const ethereumRelayer = new EthereumRelayer(ethereumSigner, nearAccount as any);
-    const nearRelayer = new NearRelayer(
-      nearAccount as any, 
-      ethereumSigner,
-      process.env.NEAR_ESCROW_CONTRACT_ID!,
-      parseInt(process.env.RELAYER_POLL_INTERVAL || '5000', 10)
-    );
+    // Initialize relayers with configuration objects
+    const ethereumRelayer = new EthereumRelayer({
+      provider: ethereumSigner.provider as ethers.providers.JsonRpcProvider,
+      signer: ethereumSigner,
+      nearAccount: nearAccount as any,
+      factoryAddress: process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS!,
+      bridgeAddress: process.env.ETHEREUM_BRIDGE_ADDRESS!,
+      storageDir: process.env.STORAGE_DIR || './storage',
+      pollIntervalMs: parseInt(process.env.RELAYER_POLL_INTERVAL || '5000', 10)
+    });
+    
+    const nearRelayer = new NearRelayer({
+      nearAccount: nearAccount as any,
+      ethereumProvider: ethereumSigner.provider as ethers.providers.JsonRpcProvider,
+      ethereumSigner: ethereumSigner,
+      escrowContractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
+      ethereumEscrowFactoryAddress: process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS!,
+      storageDir: process.env.STORAGE_DIR || './storage',
+      pollIntervalMs: parseInt(process.env.RELAYER_POLL_INTERVAL || '5000', 10)
+    });
 
     // Start relayers
     await Promise.all([
