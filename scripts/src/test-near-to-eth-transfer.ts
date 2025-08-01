@@ -37,7 +37,7 @@ const config: Config = {
   nearBridgeAddress: process.env.RESOLVER_ADDRESS || '0x4A75BC3F96554949D40d2B9fA02c070d8ae12881',
   
   // NEAR configuration
-  nearNodeUrl: process.env.NEAR_NODE_URL || 'https://rpc.testnet.near.org',
+  nearNodeUrl: process.env.NEAR_NODE_URL || 'https://rpc.testnet.fastnear.com',
   nearNetworkId: process.env.NEAR_NETWORK_ID || 'testnet',
   nearAccountId: process.env.NEAR_RELAYER_ACCOUNT_ID || 'fusionswap.testnet',
   nearPrivateKey: process.env.NEAR_PRIVATE_KEY || 'ed25519:4d4P8zT3unHRQxyMx6g7esXE3cec55xrpEGP2Jq4SAEF4GPRiiTshTrRuX5dPPsvHxy6W4LfvPjbZzSxu5VcXf1Q',

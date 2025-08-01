@@ -44,8 +44,13 @@ const fileFormat = printf(({ level, message, timestamp, ...metadata }) => {
 
 // Create the logger instance
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  // Default to debug level in development, info in production
+  level: process.env.NODE_ENV === 'production' 
+    ? (process.env.LOG_LEVEL || 'info')
+    : (process.env.LOG_LEVEL || 'debug'),
   levels,
+  // Don't exit on handled exceptions
+  exitOnError: false,
   format: combine(
     timestamp({
       format: 'YYYY-MM-DD HH:mm:ss',
@@ -53,13 +58,17 @@ const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
   ),
   transports: [
-    // Console transport
+    // Console transport with colors
     new winston.transports.Console({
+      level: 'debug', // Always show debug logs in console
       format: combine(
         colorize({ all: true }),
-        align(),
+        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
         consoleFormat,
+        align(),
       ),
+      handleExceptions: true,
+      handleRejections: true,
     }),
     // File transport for errors
     new winston.transports.DailyRotateFile({
@@ -73,12 +82,23 @@ const logger = winston.createLogger({
     }),
     // File transport for all logs
     new winston.transports.DailyRotateFile({
-      filename: path.join('logs', 'combined-%DATE%.log'),
+      level: 'debug', // Log everything to file
+      filename: path.join('logs', 'relayer-%DATE%.log'),
       datePattern: 'YYYY-MM-DD',
       zippedArchive: true,
       maxSize: '20m',
       maxFiles: '14d',
-      format: fileFormat,
+      format: combine(timestamp(), fileFormat),
+      handleExceptions: true,
+      handleRejections: true,
+    }),
+    // Error log file (errors only)
+    new winston.transports.File({
+      level: 'error',
+      filename: path.join('logs', 'error.log'),
+      format: combine(timestamp(), fileFormat),
+      handleExceptions: true,
+      handleRejections: true,
     }),
   ],
   exceptionHandlers: [

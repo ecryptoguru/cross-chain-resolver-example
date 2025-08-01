@@ -332,62 +332,94 @@ export class NearRelayer {
       const chunk = await this.nearAccount.connection.provider.chunk(chunkHash) as any;
       
       if (!chunk) {
-        logger.warn(`Chunk ${chunkHash} not found`);
+        logger.warn(`❌ Chunk ${chunkHash} not found`);
         return;
       }
 
       const transactionCount = chunk.transactions?.length || 0;
       const receiptCount = chunk.receipts?.length || 0;
-      logger.debug(`📦 Processing chunk ${chunkHash} with ${transactionCount} transactions and ${receiptCount} receipts`);
       
-      // CRITICAL: Process transactions first to identify relevant ones
+      // Enhanced logging
+      logger.info(`📦 Processing chunk ${chunkHash} in block ${blockHeight}`);
+      logger.info(`   📝 Contains ${transactionCount} transactions and ${receiptCount} receipts`);
+      
+      // Track relevant transactions
       const relevantTransactions = new Set<string>();
       
-      if (chunk.transactions && chunk.transactions.length > 0) {
+      // 1. Process transactions to identify relevant ones
+      if (chunk.transactions?.length > 0) {
+        logger.debug(`🔍 Processing ${chunk.transactions.length} transactions in chunk`);
+        
         for (const transaction of chunk.transactions) {
-          // Use type assertion to access all transaction properties
           const tx = transaction as any;
+          const isRelevant = tx.receiver_id === this.nearEscrowContractId;
           
-          // Check if this transaction is to our NEAR escrow contract
-          if (tx.receiver_id === this.nearEscrowContractId) {
+          logger.debug(`   ${isRelevant ? '🎯' : '  '} TX ${tx.hash}`);
+          logger.debug(`      Signer: ${tx.signer_id}`);
+          logger.debug(`      Receiver: ${tx.receiver_id}`);
+          logger.debug(`      Actions: ${tx.actions?.length || 0} actions`);
+          
+          if (isRelevant) {
+            relevantTransactions.add(tx.hash);
             logger.info(`🎯 Found relevant transaction: ${tx.hash}`);
             logger.info(`   From: ${tx.signer_id} To: ${tx.receiver_id}`);
-            relevantTransactions.add(tx.hash);
             
-            // Process the transaction normally
-            await this.processTransaction(tx);
+            // Process the transaction
+            try {
+              await this.processTransaction(tx);
+            } catch (error) {
+              logger.error(`❌ Error processing transaction ${tx.hash}:`, error);
+            }
           }
         }
       }
-      
-      // CRITICAL: Process receipts directly from chunk (this is what we were missing!)
-      if (chunk.receipts && chunk.receipts.length > 0) {
-        logger.debug(`   📋 Processing ${chunk.receipts.length} receipts in chunk`);
+
+      // 2. Process receipts for cross-chain messages
+      if (chunk.receipts?.length > 0) {
+        logger.debug(`🔍 Processing ${chunk.receipts.length} receipts in chunk`);
         
         for (const receipt of chunk.receipts) {
           const r = receipt as any;
+          const isRelevant = r.receiver_id === this.nearEscrowContractId;
           
-          // Check if this receipt is related to our escrow contract
-          if (r.receiver_id === this.nearEscrowContractId) {
-            logger.info(`🎯 Found relevant receipt for contract: ${this.nearEscrowContractId}`);
+          if (isRelevant) {
+            logger.info(`🎯 Found relevant receipt for contract: ${r.receiver_id}`);
+            logger.debug(`   Predecessor: ${r.predecessor_id}`);
+            logger.debug(`   Receipt ID: ${r.receipt_id}`);
             
-            // Process receipt execution outcome for logs
-            if (r.outcome && r.outcome.logs && r.outcome.logs.length > 0) {
-              logger.info(`📋 Processing ${r.outcome.logs.length} logs from receipt`);
+            // Process receipt execution outcome
+            if (r.outcome) {
+              const { logs = [], status } = r.outcome;
               
-              for (const log of r.outcome.logs) {
-                logger.info(`📋 Processing log: ${log}`);
-                await this.processNearLog(log, r.predecessor_id || 'unknown');
+              // Log transaction status
+              if (status.SuccessValue) {
+                logger.debug(`   ✅ Transaction succeeded`);
+              } else if (status.Failure) {
+                logger.warn(`   ❌ Transaction failed:`, status.Failure);
+              }
+              
+              // Process logs if any
+              if (logs.length > 0) {
+                logger.info(`   📋 Processing ${logs.length} logs from receipt ${r.receipt_id}`);
+                
+                for (const log of logs) {
+                  try {
+                    logger.debug(`   📜 Log: ${log}`);
+                    await this.processNearLog(log, r.predecessor_id || 'unknown');
+                  } catch (error) {
+                    logger.error(`❌ Error processing log:`, error);
+                  }
+                }
               }
             }
           }
         }
       }
       
-      logger.debug(`✅ Completed processing chunk ${chunkHash} in block ${blockHeight}`);
+      logger.info(`✅ Completed processing chunk ${chunkHash} in block ${blockHeight}`);
       
     } catch (error) {
-      logger.error(`Error processing chunk ${chunkHash} with receipts:`, error);
+      logger.error(`❌ Error processing chunk ${chunkHash}:`, error);
     }
   }
 
