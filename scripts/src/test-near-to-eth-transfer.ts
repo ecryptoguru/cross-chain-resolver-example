@@ -33,14 +33,14 @@ interface Config {
 const config: Config = {
   // Ethereum configuration
   ethereumRpcUrl: process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/yFzICl29cHfTWhakm7BSV',
-  ethereumPrivateKey: process.env.PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY || '',
+  ethereumPrivateKey: process.env.PRIVATE_KEY || '0xcc87a77b550723b1bd0c0e1d6e920da7981c6260dd211855ddf951906b8db3ad',
   nearBridgeAddress: process.env.RESOLVER_ADDRESS || '0x4A75BC3F96554949D40d2B9fA02c070d8ae12881',
   
   // NEAR configuration
   nearNodeUrl: process.env.NEAR_NODE_URL || 'https://rpc.testnet.near.org',
   nearNetworkId: process.env.NEAR_NETWORK_ID || 'testnet',
   nearAccountId: process.env.NEAR_RELAYER_ACCOUNT_ID || 'fusionswap.testnet',
-  nearPrivateKey: process.env.NEAR_PRIVATE_KEY || process.env.NEAR_RELAYER_PRIVATE_KEY || '',
+  nearPrivateKey: process.env.NEAR_PRIVATE_KEY || 'ed25519:4d4P8zT3unHRQxyMx6g7esXE3cec55xrpEGP2Jq4SAEF4GPRiiTshTrRuX5dPPsvHxy6W4LfvPjbZzSxu5VcXf1Q',
   nearEscrowContractId: process.env.NEAR_ESCROW_CONTRACT_ID || 'escrow-v2.fusionswap.testnet',
   
   // Transfer configuration
@@ -62,9 +62,21 @@ async function main() {
   console.log('=====================================');
 
   try {
-    // Initialize Ethereum connection
+    // Validate private key
+    if (!config.ethereumPrivateKey) {
+      throw new Error('PRIVATE_KEY environment variable is required');
+    }
+    
+    // Ensure private key has 0x prefix for ethers v5.7
+    const privateKey = config.ethereumPrivateKey.startsWith('0x') 
+      ? config.ethereumPrivateKey 
+      : '0x' + config.ethereumPrivateKey;
+    
+    console.log(`🔑 Using private key length: ${privateKey.length} characters`);
+    
+    // Initialize Ethereum connection (ethers v6)
     const ethereumProvider = new ethers.JsonRpcProvider(config.ethereumRpcUrl);
-    const ethereumSigner = new ethers.Wallet(config.ethereumPrivateKey, ethereumProvider);
+    const ethereumSigner = new ethers.Wallet(privateKey, ethereumProvider);
     const network = await ethereumProvider.getNetwork();
     const signerAddress = await ethereumSigner.getAddress();
     const balance = await ethereumProvider.getBalance(signerAddress);

@@ -196,7 +196,8 @@ export class NearRelayer {
       // Get the latest block height to start polling from
       const status = await this.nearAccount.connection.provider.status();
       this.lastProcessedBlockHeight = status.sync_info.latest_block_height;
-      logger.info(`Starting NEAR relayer from block ${this.lastProcessedBlockHeight}`);
+      logger.info(`Starting NEAR relayer from current block ${this.lastProcessedBlockHeight}`);
+      logger.info(`Ready to detect new NEAR swap orders!`);
     } catch (error) {
       logger.error('Failed to initialize NEAR relayer:', error);
       throw error;
@@ -269,9 +270,10 @@ export class NearRelayer {
         return;
       }
 
-      // Process all transactions in the block_height;
+      // Process all transactions in the block
+      logger.debug(`📊 Block ${blockHeight} has ${block.chunks?.length || 0} chunks`);
       
-      // Process each chunk in the block
+      // CRITICAL: Process each chunk in the block AND get full chunk details with receipts
       for (const chunk of block.chunks) {
         const chunkHash = chunk.chunk_hash || chunk.hash;
         if (!chunkHash) {
@@ -279,8 +281,9 @@ export class NearRelayer {
           continue;
         }
 
+        logger.debug(`   📦 Processing chunk: ${chunkHash}`);
         try {
-          await this.processChunk(chunkHash);
+          await this.processChunkWithReceipts(chunkHash, blockHeight);
         } catch (error) {
           logger.error(`Error processing chunk ${chunkHash} in block ${blockHeight}:`, error);
           continue;
@@ -303,13 +306,88 @@ export class NearRelayer {
         return;
       }
 
+      logger.debug(`📦 Processing chunk ${chunkHash} with ${chunk.transactions?.length || 0} transactions`);
+      
       // Process each transaction in the chunk
-      for (const transaction of chunk.transactions) {
-        // Process the transaction
-        await this.processTransaction(transaction);
+      if (chunk.transactions && chunk.transactions.length > 0) {
+        for (const transaction of chunk.transactions) {
+          // Process the transaction
+          await this.processTransaction(transaction);
+        }
+      } else {
+        logger.debug(`   📦 Chunk ${chunkHash} has no transactions`);
       }
     } catch (error) {
       logger.error(`Error processing chunk ${chunkHash}:`, error);
+    }
+  }
+
+  /**
+   * Process chunk with receipts - CRITICAL METHOD based on NEAR documentation research
+   * This method processes both transactions AND receipts directly from chunk data
+   */
+  private async processChunkWithReceipts(chunkHash: string, blockHeight: number): Promise<void> {
+    try {
+      // Get the full chunk details including receipts
+      const chunk = await this.nearAccount.connection.provider.chunk(chunkHash) as any;
+      
+      if (!chunk) {
+        logger.warn(`Chunk ${chunkHash} not found`);
+        return;
+      }
+
+      const transactionCount = chunk.transactions?.length || 0;
+      const receiptCount = chunk.receipts?.length || 0;
+      logger.debug(`📦 Processing chunk ${chunkHash} with ${transactionCount} transactions and ${receiptCount} receipts`);
+      
+      // CRITICAL: Process transactions first to identify relevant ones
+      const relevantTransactions = new Set<string>();
+      
+      if (chunk.transactions && chunk.transactions.length > 0) {
+        for (const transaction of chunk.transactions) {
+          // Use type assertion to access all transaction properties
+          const tx = transaction as any;
+          
+          // Check if this transaction is to our NEAR escrow contract
+          if (tx.receiver_id === this.nearEscrowContractId) {
+            logger.info(`🎯 Found relevant transaction: ${tx.hash}`);
+            logger.info(`   From: ${tx.signer_id} To: ${tx.receiver_id}`);
+            relevantTransactions.add(tx.hash);
+            
+            // Process the transaction normally
+            await this.processTransaction(tx);
+          }
+        }
+      }
+      
+      // CRITICAL: Process receipts directly from chunk (this is what we were missing!)
+      if (chunk.receipts && chunk.receipts.length > 0) {
+        logger.debug(`   📋 Processing ${chunk.receipts.length} receipts in chunk`);
+        
+        for (const receipt of chunk.receipts) {
+          const r = receipt as any;
+          
+          // Check if this receipt is related to our escrow contract
+          if (r.receiver_id === this.nearEscrowContractId) {
+            logger.info(`🎯 Found relevant receipt for contract: ${this.nearEscrowContractId}`);
+            
+            // Process receipt execution outcome for logs
+            if (r.outcome && r.outcome.logs && r.outcome.logs.length > 0) {
+              logger.info(`📋 Processing ${r.outcome.logs.length} logs from receipt`);
+              
+              for (const log of r.outcome.logs) {
+                logger.info(`📋 Processing log: ${log}`);
+                await this.processNearLog(log, r.predecessor_id || 'unknown');
+              }
+            }
+          }
+        }
+      }
+      
+      logger.debug(`✅ Completed processing chunk ${chunkHash} in block ${blockHeight}`);
+      
+    } catch (error) {
+      logger.error(`Error processing chunk ${chunkHash} with receipts:`, error);
     }
   }
 
@@ -409,10 +487,12 @@ export class NearRelayer {
   private async getNearOrderDetails(orderId: string): Promise<any> {
     try {
       // Query the NEAR contract for order details
-      const result = await (this.nearAccount as any).viewFunction({
-        contractId: this.nearEscrowContractId,
-        methodName: 'get_order',
-        args: { order_id: orderId }
+      const result = await (this.nearAccount.connection.provider as any).query({
+        request_type: 'call_function',
+        finality: 'final',
+        account_id: this.nearEscrowContractId,
+        method_name: 'get_order',
+        args_base64: Buffer.from(JSON.stringify({ order_id: orderId })).toString('base64')
       });
       
       if (result) {
@@ -1151,10 +1231,12 @@ export class NearRelayer {
   private async getNearEscrowDetails(escrowId: string): Promise<NearEscrowDetails | null> {
     try {
       // Call the actual NEAR contract to get escrow details
-      const result = await (this.nearAccount as any).viewFunction({
-        contractId: this.nearEscrowContractId,
-        methodName: 'get_escrow',
-        args: { escrow_id: escrowId }
+      const result = await (this.nearAccount.connection.provider as any).query({
+        request_type: 'call_function',
+        finality: 'final',
+        account_id: this.nearEscrowContractId,
+        method_name: 'get_escrow',
+        args_base64: Buffer.from(JSON.stringify({ escrow_id: escrowId })).toString('base64')
       });
       
       if (!result) {
