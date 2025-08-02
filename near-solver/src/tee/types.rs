@@ -1,61 +1,82 @@
-//! Type definitions for TEE attestation
+//! TEE Type definitions and utilities
 //!
-//! This module defines the types used in the TEE attestation module.
+//! This module provides comprehensive type definitions for Trusted Execution Environment (TEE)
+//! attestations, including support for multiple TEE types and their characteristics.
 
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
 use std::fmt;
+use std::str::FromStr;
+use std::hash::Hash;
 
-/// Types of Trusted Execution Environments supported
-#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// Represents different types of TEE environments
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(crate = "near_sdk::serde")]
 pub enum TeeType {
-    /// Intel SGX
+    /// Intel Software Guard Extensions (SGX)
     Sgx,
-    /// AMD SEV
+    /// AMD Secure Encrypted Virtualization (SEV)
     Sev,
     /// ARM TrustZone
     TrustZone,
     /// Google Asylo
     Asylo,
-    /// Azure Confidential Computing
-    Azure,
+    /// Microsoft Azure Attestation
+    AzureAttestation,
     /// AWS Nitro Enclaves
     AwsNitro,
-    /// Other TEE type
+    /// Other TEE type (for future compatibility)
     Other(String),
+}
+
+impl TeeType {
+    /// Returns the string representation of the TEE type
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Sgx => "sgx",
+            Self::Sev => "sev",
+            Self::TrustZone => "trustzone",
+            Self::Asylo => "asylo",
+            Self::AzureAttestation => "azure_attestation",
+            Self::AwsNitro => "aws_nitro",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+    
+    /// Returns true if this TEE type is considered production-ready
+    pub fn is_production_ready(&self) -> bool {
+        matches!(self, Self::Sgx | Self::Sev | Self::TrustZone)
+    }
+    
+    /// Returns true if this TEE type is cloud-based
+    pub fn is_cloud_based(&self) -> bool {
+        matches!(self, Self::AzureAttestation | Self::AwsNitro)
+    }
 }
 
 impl fmt::Display for TeeType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Sgx => write!(f, "sgx"),
-            Self::Sev => write!(f, "sev"),
-            Self::TrustZone => write!(f, "trustzone"),
-            Self::Asylo => write!(f, "asylo"),
-            Self::Azure => write!(f, "azure"),
-            Self::AwsNitro => write!(f, "aws_nitro"),
             Self::Other(s) => write!(f, "other:{}", s),
+            _ => write!(f, "{}", self.as_str()),
         }
     }
 }
 
-impl std::str::FromStr for TeeType {
+impl FromStr for TeeType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "sgx" => Ok(Self::Sgx),
             "sev" => Ok(Self::Sev),
-            "trustzone" => Ok(Self::TrustZone),
+            "trustzone" | "trust_zone" => Ok(Self::TrustZone),
             "asylo" => Ok(Self::Asylo),
-            "azure" => Ok(Self::Azure),
-            "aws_nitro" => Ok(Self::AwsNitro),
-            s if s.starts_with("other:") => {
-                let other_type = s.strip_prefix("other:").unwrap_or(s).to_string();
-                Ok(Self::Other(other_type))
-            }
-            _ => Err(format!("Unknown TEE type: {}", s)),
+            "azure_attestation" | "azure" => Ok(Self::AzureAttestation),
+            "aws_nitro" | "nitro" => Ok(Self::AwsNitro),
+            _ if s.starts_with("other:") => Ok(Self::Other(s[6..].to_string())),
+            _ => Err(format!("Invalid TEE type: {}", s)),
         }
     }
 }

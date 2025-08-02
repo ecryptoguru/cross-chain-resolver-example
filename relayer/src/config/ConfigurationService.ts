@@ -118,6 +118,8 @@ export class ConfigurationService extends EventEmitter {
 
   private constructor(configPath?: string) {
     super();
+    // Set higher limit for event listeners to prevent MaxListenersExceededWarning
+    this.setMaxListeners(20);
     this.configPath = configPath || this.getDefaultConfigPath();
   }
 

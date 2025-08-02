@@ -286,7 +286,7 @@ export class NearContractService implements IContractService {
         request_type: 'call_function',
         finality: 'final',
         account_id: this.escrowContractId,
-        method_name: 'get_escrow_details',
+        method_name: 'get_order',
         args_base64: Buffer.from(JSON.stringify({ order_id: orderId })).toString('base64')
       });
 

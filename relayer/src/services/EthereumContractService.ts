@@ -75,6 +75,49 @@ export class EthereumContractService implements IContractService {
   }
 
   /**
+   * Execute a transaction on the factory contract
+   */
+  async executeFactoryTransaction(
+    method: string,
+    params: any[]
+  ): Promise<ethers.ContractTransaction> {
+    try {
+      if (!method || typeof method !== 'string') {
+        throw ErrorHandler.createValidationError('method', method, 'Method name must be a non-empty string');
+      }
+
+      if (!Array.isArray(params)) {
+        throw ErrorHandler.createValidationError('params', params, 'Parameters must be an array');
+      }
+
+      // Use factory contract with signer for write operations
+      const factoryWithSigner = this.factoryContract.connect(this.signer);
+      
+      // Execute the transaction
+      const tx = await factoryWithSigner[method](...params);
+      
+      logger.info('Factory transaction executed successfully', {
+        factoryAddress: this.factoryContract.address,
+        method,
+        txHash: tx.hash,
+        nonce: tx.nonce
+      });
+
+      return tx;
+    } catch (error) {
+      throw new ContractError(
+        `Failed to execute factory transaction: ${method}`,
+        this.factoryContract.address,
+        method,
+        { 
+          params,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      );
+    }
+  }
+
+  /**
    * Execute a transaction on a contract
    */
   async executeTransaction(

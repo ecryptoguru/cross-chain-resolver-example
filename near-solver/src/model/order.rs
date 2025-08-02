@@ -4,6 +4,7 @@ use near_sdk::{
     serde::{Deserialize, Serialize},
     AccountId, log, PromiseResult,
 };
+use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -11,7 +12,7 @@ use std::fmt;
 pub use crate::event::ContractEvent;
 
 // Custom error type for validation
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
 pub enum ValidationError {
     /// The order has expired
@@ -62,7 +63,7 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 /// Represents the status of a cross-chain swap order
-#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(crate = "near_sdk::serde")]
 pub enum OrderStatus {
     /// Order has been created but not yet processed
@@ -93,8 +94,7 @@ impl fmt::Display for OrderStatus {
 }
 
 /// Represents a cross-chain swap order
-#[near_bindgen]
-#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(crate = "near_sdk::serde")]
 pub struct CrossChainOrder {
     /// Unique identifier for the order
@@ -119,7 +119,8 @@ pub struct CrossChainOrder {
     pub dest_address: String,
     /// Minimum amount of tokens to receive (slippage protection)
     pub min_amount_out: u128,
-    /// Address of the user who created the order
+    /// The NEAR account ID that created this order
+    #[schemars(with = "String")]
     pub creator: AccountId,
     /// Recipient address on the destination chain
     pub recipient: String,

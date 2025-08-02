@@ -879,8 +879,7 @@ export class NearRelayer implements IMessageProcessor {
       ];
 
       // Create Ethereum escrow using factory
-      const tx = await this.ethereumContractService.executeTransaction(
-        this.config.ethereumEscrowFactoryAddress,
+      const tx = await this.ethereumContractService.executeFactoryTransaction(
         'createDstEscrow',
         [immutables, 0] // immutables and srcCancellationTimestamp
       );

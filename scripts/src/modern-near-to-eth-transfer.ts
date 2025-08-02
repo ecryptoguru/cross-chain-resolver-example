@@ -540,7 +540,7 @@ class ModernNearToEthTransferTester {
       
       // Wait for relayer to have time to process recent blocks
       // The relayer polls every 3 seconds, so we wait longer to ensure it catches up
-      const relayerProcessingTime = 30000; // 30 seconds
+      const relayerProcessingTime = 1000; // 1 seconds
       
       this.logger.info('Waiting for relayer to process transaction block', {
         orderId,

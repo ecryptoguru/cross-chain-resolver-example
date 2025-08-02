@@ -101,6 +101,13 @@ async function main() {
       process.exit(0);
     };
 
+    // Set higher limit for process event listeners to prevent MaxListenersExceededWarning
+    process.setMaxListeners(20);
+    
+    // Remove any existing listeners to prevent duplicates
+    process.removeAllListeners('SIGTERM');
+    process.removeAllListeners('SIGINT');
+    
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
 

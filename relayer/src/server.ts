@@ -106,9 +106,13 @@ function setupGracefulShutdown(server: http.Server) {
     }, 5000);
   };
   
-  // Handle shutdown signals
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  // Handle shutdown signals (only if not already handled by main process)
+  if (process.listenerCount('SIGTERM') === 0) {
+    process.on('SIGTERM', shutdown);
+  }
+  if (process.listenerCount('SIGINT') === 0) {
+    process.on('SIGINT', shutdown);
+  }
 }
 
 export {
