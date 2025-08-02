@@ -2,8 +2,13 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { ethers } from 'ethers';
-import { getSignerFromPrivateKey, getTestnetRpcProvider, SignedTransactionComposer, callViewMethod } from '@near-js/client';
+import { JsonRpcProvider } from '@near-js/providers';
+import { InMemoryKeyStore } from '@near-js/keystores';
+import { KeyPair } from '@near-js/crypto';
 import { parseNearAmount, formatNearAmount } from '@near-js/utils';
+import { getTestnetRpcProvider, getProviderByEndpoints } from '@near-js/client';
+import { Account, Connection } from '@near-js/accounts';
+import { InMemorySigner } from '@near-js/signers';
 import { createLogger, Logger, format, transports } from 'winston';
 
 // Load environment variables
@@ -70,8 +75,9 @@ interface TestResult {
 class ModernNearToEthTransferTester {
   private config: TestConfig;
   private logger: Logger;
-  private signer: any;
   private rpcProvider: any;
+  private signer: any;
+  private nearAccount: Account | null = null;
 
   constructor(config: TestConfig) {
     this.config = config;
@@ -217,18 +223,23 @@ class ModernNearToEthTransferTester {
         throw new Error('NEAR node URL is missing');
       }
 
-      // Initialize signer using InMemorySigner with KeyStore
-      const { InMemorySigner } = await import('@near-js/signers');
-      const { InMemoryKeyStore } = await import('@near-js/keystores');
-      const { KeyPair } = await import('@near-js/crypto');
+      // Initialize RPC provider using @near-js/client with higher-rate endpoint
+      if (this.config.nearNetworkId === 'testnet') {
+        // Use the configured RPC URL instead of default to avoid rate limits
+        this.rpcProvider = getProviderByEndpoints(this.config.nearNodeUrl);
+      } else {
+        this.rpcProvider = getProviderByEndpoints(this.config.nearNodeUrl);
+      }
       
-      const keyPair = KeyPair.fromString(this.config.nearPrivateKey as any);
+      // Initialize signer using InMemorySigner for Account/Connection compatibility
       const keyStore = new InMemoryKeyStore();
+      const keyPair = KeyPair.fromString(this.config.nearPrivateKey as any);
       await keyStore.setKey(this.config.nearNetworkId, this.config.nearAccountId, keyPair);
       this.signer = new InMemorySigner(keyStore);
       
-      // Initialize RPC provider
-      this.rpcProvider = getTestnetRpcProvider();
+      // Create NEAR connection and account
+      const connection = new Connection(this.config.nearNetworkId, this.rpcProvider, this.signer, '');
+      this.nearAccount = new Account(connection, this.config.nearAccountId);
 
       this.logger.info('NEAR connection initialized successfully', {
         networkId: this.config.nearNetworkId,
@@ -313,32 +324,26 @@ class ModernNearToEthTransferTester {
       if (!amountYocto) {
         throw new Error('Invalid transfer amount');
       }
-      const amountBigInt = BigInt(amountYocto);
 
-      // Create NEAR account instance using Connection
-      const { Account, Connection } = await import('@near-js/accounts');
-      const connection = new Connection(
-        this.config.nearNetworkId,
-        this.rpcProvider,
-        this.signer,
-        '' // jsvmAccountId
-      );
-      const account = new Account(connection, this.config.nearAccountId);
-
-      // Execute the escrow order creation using standard NEAR API
-      const result = await account.functionCall({
+      // Execute the escrow order creation using Account.functionCall from @near-js/accounts
+      // This approach should avoid BigInt serialization issues
+      if (!this.nearAccount) {
+        throw new Error('NEAR account not initialized');
+      }
+      
+      const result = await this.nearAccount.functionCall({
         contractId: this.config.nearEscrowContractId,
         methodName: 'create_swap_order',
         args: {
           recipient: this.config.ethRecipient,
           hashlock: secretHash,
-          timelock_duration: this.config.timelock
+          timelock_duration: this.config.timelock // Use number for u64 contract parameter
         },
-        gas: BigInt('300000000000000'), // 300 TGas
-        attachedDeposit: amountBigInt
+        gas: BigInt('300000000000000'), // 300 TGas as BigInt
+        attachedDeposit: BigInt(amountYocto) // Use BigInt for deposit
       });
 
-      // Extract order ID from transaction result
+      // Extract order ID from transaction result (Account.functionCall FinalExecutionOutcome response)
       let orderId: string;
       if (result.status && typeof result.status === 'object' && 'SuccessValue' in result.status) {
         const successValue = (result.status as any).SuccessValue;
@@ -351,7 +356,7 @@ class ModernNearToEthTransferTester {
       } else {
         throw new Error('Contract call failed or returned no success value');
       }
-
+      
       const nearTxHash = result.transaction.hash;
 
       this.logger.info('NEAR escrow order created successfully', {
@@ -377,22 +382,25 @@ class ModernNearToEthTransferTester {
       this.logger.info('Verifying NEAR escrow order', { orderId });
 
       // Query the NEAR contract for order details
-      const orderInfo: any = await callViewMethod({
-        account: this.config.nearEscrowContractId,
-        method: 'get_order',
-        args: { order_id: orderId },
-        deps: { rpcProvider: this.rpcProvider }
+      if (!this.nearAccount) {
+        throw new Error('NEAR account not initialized');
+      }
+      
+      const orderData = await this.nearAccount.viewFunction({
+        contractId: this.config.nearEscrowContractId,
+        methodName: 'get_order',
+        args: { order_id: orderId }
       });
 
       // Debug the full order response
       this.logger.info('NEAR contract response', {
         orderId,
-        orderInfo,
-        orderInfoType: typeof orderInfo,
-        orderInfoKeys: orderInfo ? Object.keys(orderInfo) : 'null'
+        orderData,
+        orderDataType: typeof orderData,
+        orderDataKeys: orderData ? Object.keys(orderData) : 'null'
       });
 
-      if (!orderInfo) {
+      if (!orderData) {
         this.logger.warn('Order not found in NEAR contract - may need time to propagate', { orderId });
         // For now, skip verification and return a basic order info
         return {
@@ -408,10 +416,10 @@ class ModernNearToEthTransferTester {
 
       // Parse the NEAR contract response - it returns result as byte array
       let actualOrderData: any;
-      if (orderInfo.result && Array.isArray(orderInfo.result)) {
+      if (orderData.result && Array.isArray(orderData.result)) {
         try {
           // Convert byte array to string and parse JSON
-          const resultString = String.fromCharCode(...orderInfo.result);
+          const resultString = String.fromCharCode(...orderData.result);
           actualOrderData = JSON.parse(resultString);
           this.logger.info('Parsed NEAR order', {
             orderId,
@@ -421,13 +429,13 @@ class ModernNearToEthTransferTester {
         } catch (error) {
           this.logger.error('Failed to parse NEAR contract result', {
             error: error instanceof Error ? error.message : String(error),
-            resultLength: orderInfo.result.length
+            resultLength: orderData.result.length
           });
-          throw new NearError('Failed to parse NEAR contract response', { error });
+          throw new Error('Failed to parse NEAR contract response');
         }
       } else {
-        // If no result field, use orderInfo directly
-        actualOrderData = orderInfo;
+        // If no result field, use orderData directly
+        actualOrderData = orderData;
       }
 
       // Validate order details with better error handling
@@ -452,7 +460,7 @@ class ModernNearToEthTransferTester {
           expected: expectedAmount,
           actual: actualAmount,
           expectedType: typeof expectedAmount,
-          actualType: typeof orderInfo.amount
+          actualType: typeof orderData.amount
         });
         
         // Allow slight differences due to precision
@@ -486,22 +494,19 @@ class ModernNearToEthTransferTester {
       }
 
       if (actualOrderData.recipient !== this.config.ethRecipient) {
-        throw new NearError('Order recipient mismatch', {
-          expected: this.config.ethRecipient,
-          actual: actualOrderData.recipient
-        });
+        throw new Error('Order recipient mismatch');
       }
 
-      this.logger.info('NEAR escrow order verified successfully', {
+      this.logger.info('NEAR order verified successfully', {
         orderId,
-        amount: formatNearAmount(actualOrderData.amount),
-        recipient: actualOrderData.recipient,
+        orderData: actualOrderData.recipient,
+        amount: actualOrderData.amount || actualOrderData.value,
         status: actualOrderData.status
       });
 
       return {
         orderId: actualOrderData.id || orderId,
-        amount: formatNearAmount(actualOrderData.amount),
+        amount: formatNearAmount(actualOrderData.amount || actualOrderData.value || expectedAmount || '0'),
         recipient: actualOrderData.recipient,
         hashlock: actualOrderData.hashlock || '',
         timelock: actualOrderData.timelock || this.config.timelock,
@@ -512,9 +517,10 @@ class ModernNearToEthTransferTester {
     } catch (error) {
       this.logger.error('Failed to verify NEAR escrow order', {
         error: error instanceof Error ? error.message : String(error),
-        orderId
+        orderId,
+        stack: error instanceof Error ? error.stack : undefined
       });
-      throw new NearError('Failed to verify NEAR escrow order', { error });
+      throw new Error(`Failed to verify NEAR escrow order: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
