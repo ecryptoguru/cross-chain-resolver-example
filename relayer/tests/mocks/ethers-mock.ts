@@ -48,6 +48,7 @@ export class MockProvider {
   private receipts: Map<string, MockTransactionReceipt> = new Map();
   private contracts: Map<string, MockContract> = new Map();
   private _mockError: Error | null = null;
+  private _mockEscrow: any = null;
 
   // Internal ethers.js type markers
   readonly _isProvider = true;
@@ -74,6 +75,7 @@ export class MockProvider {
   }
 
   async detectNetwork(): Promise<any> {
+    if (this._mockError) throw this._mockError;
     return this._networkPromise;
   }
 
@@ -91,8 +93,29 @@ export class MockProvider {
     }
   }
 
+  // Set the mock block number for testing
+  setMockBlockNumber(blockNumber: number): void {
+    this.blockNumber = blockNumber;
+  }
+
+  // Add a method to set mock logs for testing
+  setMockLogs(logs: MockLogEntry[]): void {
+    this.logs = logs;
+  }
+
+  // Set mock error for testing error cases
+  setMockError(error: Error | null): void {
+    this._mockError = error;
+  }
+
+  // Set mock escrow for testing
+  setMockEscrow(escrow: any): void {
+    this._mockError = null; // Clear any previous error
+    this._mockEscrow = escrow;
+  }
+
   async getLogs(filter: any): Promise<MockLogEntry[]> {
-    return this.logs.filter(log => {
+    return Promise.resolve(this.logs.filter(log => {
       if (filter.address && log.address !== filter.address) return false;
       if (filter.fromBlock && log.blockNumber < filter.fromBlock) return false;
       if (filter.toBlock && log.blockNumber > filter.toBlock) return false;
@@ -102,7 +125,7 @@ export class MockProvider {
         );
       }
       return true;
-    });
+    }));
   }
 
   async getTransactionReceipt(txHash: string): Promise<MockTransactionReceipt | null> {
@@ -183,6 +206,7 @@ export class MockProvider {
 
   // Mock control methods for testing
   setMockContract(contract: MockContract): void {
+    // Use the contract's address as the key in the contracts map
     this.contracts.set(contract.address, contract);
   }
 
@@ -190,9 +214,11 @@ export class MockProvider {
     this.contracts.set(address, contract);
   }
 
-  setMockError(error: Error | null): void {
-    this._mockError = error;
-    // TODO: Implement error injection in mock methods when needed
+  // setMockError and setMockEscrow methods are defined above
+  // These duplicates have been removed to resolve TypeScript errors
+
+  getEscrow(): any {
+    return this._mockEscrow;
   }
 
   getMockContract(address: string): MockContract | undefined {
@@ -333,6 +359,26 @@ export class MockContract {
   }
 
   // Event filtering
+  private _mockQueryFilterResults: Map<string, any[]> = new Map();
+  
+  // Set mock query filter results for testing
+  setMockQueryFilterResult(eventName: string, results: any[]): void {
+    this._mockQueryFilterResults.set(eventName, results);
+  }
+
+  // Mock queryFilter implementation
+  async queryFilter(event: any, fromBlock?: number, toBlock?: number): Promise<any[]> {
+    const eventName = event?.name || event?.fragment?.name || '';
+    const mockResults = this._mockQueryFilterResults.get(eventName) || [];
+    
+    // Filter by block range if provided
+    return mockResults.filter((result: any) => {
+      if (fromBlock && result.blockNumber < fromBlock) return false;
+      if (toBlock && result.blockNumber > toBlock) return false;
+      return true;
+    });
+  }
+
   filters = {
     DepositInitiated: (..._args: any[]) => ({
       address: this.address,
@@ -348,14 +394,8 @@ export class MockContract {
     })
   };
 
-  async queryFilter(filter: any, fromBlock?: number, toBlock?: number): Promise<MockLogEntry[]> {
-    return this.provider.getLogs({
-      address: filter.address,
-      topics: filter.topics,
-      fromBlock,
-      toBlock
-    });
-  }
+  // queryFilter implementation is already provided above with more functionality
+  // This duplicate has been removed to resolve TypeScript errors
 }
 
 // Mock ethers utilities

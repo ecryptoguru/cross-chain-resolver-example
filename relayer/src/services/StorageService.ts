@@ -30,6 +30,21 @@ export class StorageService implements IStorageService {
 
     try {
       await this.ensureStorageDirectory();
+      
+      // Check if the storage file exists, if not create an empty one
+      const filePath = this.getStorageFilePath();
+      try {
+        await fs.access(filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          // File doesn't exist, create an empty array in it
+          await fs.writeFile(filePath, JSON.stringify([], null, 2), 'utf8');
+          logger.info('Created new empty storage file', { filePath });
+        } else {
+          throw error;
+        }
+      }
+      
       await this.loadProcessedMessages();
       this.isInitialized = true;
       logger.info('Storage service initialized successfully', {
@@ -261,56 +276,224 @@ export class StorageService implements IStorageService {
     return path.join(this.storageDir, this.filename);
   }
 
+  /**
+   * Check if a directory exists
+   */
+  private async directoryExists(path: string): Promise<boolean> {
+    try {
+      const stats = await fs.stat(path);
+      return stats.isDirectory();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return false;
+      }
+      throw error; // Re-throw unexpected errors
+    }
+  }
+
+  /**
+   * Check if a file exists
+   */
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      const stats = await fs.stat(filePath);
+      return stats.isFile();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return false;
+      }
+      throw error; // Re-throw unexpected errors
+    }
+  }
+
   private async ensureStorageDirectory(): Promise<void> {
     try {
-      await fs.access(this.storageDir);
-    } catch {
+      logger.debug('Ensuring storage directory exists', { 
+        storageDir: this.storageDir,
+        cwd: process.cwd()
+      });
+      
       try {
-        await fs.mkdir(this.storageDir, { recursive: true });
-        logger.info('Created storage directory', { storageDir: this.storageDir });
+        // First check if directory exists
+        const stats = await fs.stat(this.storageDir);
+        
+        if (!stats.isDirectory()) {
+          throw new Error(`Path exists but is not a directory: ${this.storageDir}`);
+        }
+        
+        logger.debug('Storage directory exists and is accessible', { 
+          storageDir: this.storageDir,
+          isDirectory: stats.isDirectory(),
+          isWritable: true
+        });
       } catch (error) {
-        throw new StorageError(
-          'Failed to create storage directory',
-          'mkdir',
-          this.storageDir,
-          { error: error instanceof Error ? error.message : String(error) }
-        );
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          logger.debug('Storage directory does not exist, creating...', { 
+            storageDir: this.storageDir 
+          });
+          
+          // Create directory with explicit permissions
+          await fs.mkdir(this.storageDir, { 
+            recursive: true,
+            mode: 0o755 // rwxr-xr-x
+          });
+          
+          logger.info('Created storage directory', { 
+            storageDir: this.storageDir,
+            created: true
+          });
+          
+          // Verify the directory was created and is writable
+          try {
+            const testFile = path.join(this.storageDir, '.write-test');
+            await fs.writeFile(testFile, 'test');
+            await fs.unlink(testFile);
+            
+            logger.debug('Verified write access to storage directory', {
+              storageDir: this.storageDir
+            });
+          } catch (writeError) {
+            const errorMessage = `Failed to write to storage directory '${this.storageDir}': ${writeError instanceof Error ? writeError.message : String(writeError)}`;
+            throw new StorageError(
+              errorMessage,
+              'write',
+              this.storageDir,
+              { error: errorMessage }
+            );
+          }
+        } else {
+          throw error;
+        }
       }
+    } catch (error) {
+      throw new StorageError(
+        `Failed to ensure storage directory: ${error instanceof Error ? error.message : String(error)}`,
+        'ensureDirectory',
+        this.storageDir,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
     }
   }
 
   private async persistToFile(): Promise<void> {
     const filePath = this.getStorageFilePath();
     const tempFile = `${filePath}.tmp`;
+    const messages = Array.from(this.processedMessages);
+    
+    logger.debug('Persisting messages to file', {
+      filePath,
+      messageCount: messages.length,
+      storageDir: this.storageDir
+    });
 
     try {
-      // Convert Set to Array for JSON serialization
-      const messages = Array.from(this.processedMessages);
-      const data = JSON.stringify(messages, null, 2);
+      // Ensure the storage directory exists and is writable
+      await this.ensureStorageDirectory();
+      
+      // Check directory permissions
+      const dirStats = await fs.stat(this.storageDir);
+      if (!dirStats.isDirectory()) {
+        throw new Error(`Storage path is not a directory: ${this.storageDir}`);
+      }
+      
+      // Check write permissions
+      try {
+        const testFile = path.join(this.storageDir, `.write-test-${Date.now()}`);
+        await fs.writeFile(testFile, 'test');
+        await fs.unlink(testFile);
+      } catch (permError) {
+        throw new Error(`No write permission in directory: ${this.storageDir}. ${permError instanceof Error ? permError.message : String(permError)}`);
+      }
 
       // Write to temporary file first (atomic operation)
+      const data = JSON.stringify(messages, null, 2);
+      logger.debug('Writing to temporary file', { tempFile, dataLength: data.length });
+      
       await fs.writeFile(tempFile, data, 'utf8');
       
+      // Verify temp file was written
+      const tempStats = await fs.stat(tempFile);
+      if (tempStats.size === 0) {
+        throw new Error('Temporary file was created but is empty');
+      }
+      
+      // On Windows, we need to handle the case where the destination exists
+      if (process.platform === 'win32' && await this.fileExists(filePath)) {
+        try {
+          await fs.unlink(filePath);
+        } catch (unlinkError) {
+          // If we can't delete the existing file, try renaming it
+          const backupFile = `${filePath}.bak-${Date.now()}`;
+          logger.warn(`Could not remove existing file, attempting to rename to ${backupFile}`, {
+            filePath,
+            error: unlinkError instanceof Error ? unlinkError.message : String(unlinkError)
+          });
+          await fs.rename(filePath, backupFile);
+        }
+      }
+      
       // Rename to final file (atomic on most filesystems)
+      logger.debug('Renaming temp file to final location', { 
+        tempFile, 
+        filePath,
+        tempFileSize: tempStats.size
+      });
+      
       await fs.rename(tempFile, filePath);
 
-      logger.debug('Persisted messages to storage', { 
+      // Verify final file exists and has content
+      const finalStats = await fs.stat(filePath);
+      if (finalStats.size === 0) {
+        throw new Error('Final file was created but is empty');
+      }
+
+      logger.info('Successfully persisted messages to storage', { 
         messageCount: messages.length, 
-        filePath 
+        filePath,
+        fileSize: finalStats.size
       });
     } catch (error) {
       // Clean up temp file if it exists
       try {
-        await fs.unlink(tempFile);
-      } catch {
-        // Ignore cleanup errors
+        if (await this.fileExists(tempFile)) {
+          await fs.unlink(tempFile);
+        }
+      } catch (unlinkError) {
+        logger.warn('Failed to clean up temporary file', { 
+          tempFile,
+          error: unlinkError instanceof Error ? unlinkError.message : String(unlinkError)
+        });
       }
-
+      
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      
+      // Log detailed error information
+      const errorContext = {
+        filePath,
+        error: errorMessage,
+        stack: errorStack,
+        storageDir: this.storageDir,
+        dirExists: await this.directoryExists(this.storageDir),
+        fileExists: await this.fileExists(filePath),
+        tempFileExists: await this.fileExists(tempFile),
+        platform: process.platform,
+        nodeVersion: process.version
+      };
+      
+      logger.error('Failed to persist messages to file', errorContext);
+      
       throw new StorageError(
-        'Failed to persist messages to file',
+        `Failed to persist messages to file: ${errorMessage}`,
         'write',
         filePath,
-        { error: error instanceof Error ? error.message : String(error) }
+        { 
+          error: errorMessage,
+          stack: errorStack,
+          storageDir: this.storageDir,
+          dirExists: await this.directoryExists(this.storageDir),
+          fileExists: await this.fileExists(filePath)
+        }
       );
     }
   }

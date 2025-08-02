@@ -5,7 +5,7 @@ import * as crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createLogger, format, transports, Logger } from 'winston';
 
-dotenv.config({ path: '../../.env' });
+dotenv.config();
 
 // Enhanced error classes
 class CrossChainTestError extends Error {
@@ -89,7 +89,7 @@ class ConfigValidator {
       errors.push('Invalid or missing transferAmount');
     }
 
-    if (!config.recipient || !ethers.isAddress(config.recipient)) {
+    if (!config.recipient || config.recipient.length < 2) {
       errors.push('Invalid or missing recipient address');
     }
 
@@ -149,14 +149,13 @@ class CrossChainTransferTester {
   private bridgeContract: ethers.Contract;
 
   private static readonly BRIDGE_ABI = [
-    'function initiateDeposit(string calldata nearRecipient, bytes32 secretHash, uint256 timelock) external payable',
+    'function depositEth(string calldata nearRecipient, bytes32 secretHash, uint256 timelock) external payable',
+    'function deposits(bytes32) external view returns (address token, address depositor, string memory nearRecipient, uint256 amount, uint256 timestamp, bool claimed, bool disputed, uint256 disputeEndTime, bytes32 secretHash, uint256 timelock)',
     'function completeWithdrawal(bytes32 depositId, address recipient, string calldata secret, bytes[] calldata signatures) external',
-    'function deposits(bytes32 depositId) external view returns (address token, address depositor, string memory nearRecipient, uint256 amount, uint256 timestamp, bool claimed, bool disputed, uint256 disputeEndTime, bytes32 secretHash, uint256 timelock)',
-    'function getDepositId(address depositor, uint256 nonce) external pure returns (bytes32)',
-    'function nonces(address depositor) external view returns (uint256)',
+    'function claim(bytes32 depositId, bytes32 secret) external',
     'event DepositInitiated(bytes32 indexed depositId, address indexed sender, string nearRecipient, address token, uint256 amount, uint256 fee, uint256 timestamp)',
-    'event MessageSent(bytes32 indexed messageId, bytes32 indexed depositId, address indexed sender, string nearRecipient, uint256 amount, uint256 timestamp)',
-    'event WithdrawalCompleted(bytes32 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp)'
+    'event WithdrawalCompleted(bytes32 indexed depositId, address indexed recipient, uint256 amount, uint256 timestamp)',
+    'event Claimed(bytes32 indexed depositId, address indexed claimer, uint256 amount, uint256 timestamp)'
   ] as const;
 
   constructor(config: Partial<TestConfig>) {
@@ -331,36 +330,52 @@ class CrossChainTransferTester {
     gasUsed?: bigint;
   }> {
     try {
+      // Calculate timelock as future timestamp (current time + duration)
+      const timelockTimestamp = Math.floor(Date.now() / 1000) + this.config.timelock;
+
       this.logger.info('Initiating deposit...', {
         secretHash,
         amount: this.config.transferAmount,
-        timelock: this.config.timelock
+        timelockDuration: this.config.timelock,
+        timelockTimestamp,
+        timelockDate: new Date(timelockTimestamp * 1000).toISOString()
       });
 
-      const nonce = await this.bridgeContract.nonces(this.signer.address);
-      const depositId = await this.bridgeContract.getDepositId(this.signer.address, nonce);
-
-      this.logger.info('Calculated deposit ID', {
-        nonce: nonce.toString(),
-        depositId
-      });
-
-      const tx = await this.bridgeContract.initiateDeposit(
+      // Estimate gas for the transaction
+      const gasEstimate = await this.bridgeContract.depositEth.estimateGas(
         this.config.recipient,
         secretHash,
-        this.config.timelock,
+        timelockTimestamp,
+        {
+          value: ethers.parseEther(this.config.transferAmount)
+        }
+      );
+
+      this.logger.info('Gas estimation completed', {
+        estimatedGas: gasEstimate.toString(),
+        gasLimitUsed: (gasEstimate * 120n / 100n).toString() // Add 20% buffer
+      });
+
+      const tx = await this.bridgeContract.depositEth(
+        this.config.recipient,
+        secretHash,
+        timelockTimestamp,
         {
           value: ethers.parseEther(this.config.transferAmount),
-          gasLimit: 500000
+          gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
         }
       );
 
       this.logger.info('Deposit transaction sent', {
-        transactionHash: tx.hash,
-        depositId
+        transactionHash: tx.hash
       });
 
-      const receipt = await tx.wait();
+      this.logger.info('Waiting for transaction confirmation...', {
+        transactionHash: tx.hash,
+        confirmations: 1
+      });
+
+      const receipt = await tx.wait(1); // Wait for 1 confirmation
       
       if (!receipt) {
         throw new ContractError('Transaction receipt not available');
@@ -369,7 +384,8 @@ class CrossChainTransferTester {
       if (receipt.status !== 1) {
         throw new ContractError('Transaction failed', {
           status: receipt.status,
-          transactionHash: tx.hash
+          transactionHash: tx.hash,
+          gasUsed: receipt.gasUsed?.toString()
         });
       }
 
@@ -379,7 +395,8 @@ class CrossChainTransferTester {
         gasUsed: receipt.gasUsed.toString()
       });
 
-      await this.parseDepositEvents(receipt);
+      // Extract deposit ID from transaction events
+      const depositId = await this.parseDepositEvents(receipt);
 
       return {
         depositId,
@@ -388,6 +405,11 @@ class CrossChainTransferTester {
       };
 
     } catch (error) {
+      this.logger.error('Deposit initiation failed', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof CrossChainTestError) {
         throw error;
       }
@@ -437,12 +459,25 @@ class CrossChainTransferTester {
       }
 
       const expectedAmount = ethers.parseEther(this.config.transferAmount);
-      if (deposit.amount !== expectedAmount) {
-        throw new ValidationError('Amount mismatch', {
+      
+      // Account for bridge fees - the deposit amount will be less than the sent amount
+      // Allow for reasonable fee deduction (up to 1% of the transfer amount)
+      const maxFeeAmount = expectedAmount / 100n; // 1% max fee
+      const minExpectedAmount = expectedAmount - maxFeeAmount;
+      
+      if (deposit.amount < minExpectedAmount) {
+        throw new ValidationError('Amount too low after fees', {
           expected: ethers.formatEther(expectedAmount),
-          actual: ethers.formatEther(deposit.amount)
+          actual: ethers.formatEther(deposit.amount),
+          minExpected: ethers.formatEther(minExpectedAmount)
         });
       }
+      
+      this.logger.info('Amount validation passed (accounting for bridge fees)', {
+        sentAmount: ethers.formatEther(expectedAmount),
+        receivedAmount: ethers.formatEther(deposit.amount),
+        feeDeducted: ethers.formatEther(expectedAmount - deposit.amount)
+      });
 
       this.logger.info('Deposit verification passed', {
         depositId,
@@ -501,12 +536,14 @@ class CrossChainTransferTester {
     }
   }
 
-  private async parseDepositEvents(receipt: ethers.TransactionReceipt): Promise<void> {
+  private async parseDepositEvents(receipt: ethers.TransactionReceipt): Promise<string> {
     try {
       this.logger.info('Parsing deposit events...', {
         transactionHash: receipt.hash,
         logsCount: receipt.logs.length
       });
+
+      let depositId: string | null = null;
 
       for (let i = 0; i < receipt.logs.length; i++) {
         const log = receipt.logs[i];
@@ -523,6 +560,12 @@ class CrossChainTransferTester {
               eventName: parsedLog.name,
               args: this.formatEventArgs(parsedLog.name, parsedLog.args)
             });
+
+            // Extract deposit ID from DepositInitiated event
+            if (parsedLog.name === 'DepositInitiated' && parsedLog.args.depositId) {
+              depositId = parsedLog.args.depositId;
+              this.logger.info('Deposit ID extracted from event', { depositId });
+            }
           }
         } catch (parseError) {
           this.logger.debug(`Could not parse log ${i + 1}`, {
@@ -532,8 +575,15 @@ class CrossChainTransferTester {
         }
       }
 
+      if (!depositId) {
+        throw new ContractError('DepositInitiated event not found or deposit ID missing');
+      }
+
+      return depositId;
+
     } catch (error) {
-      this.logger.warn('Failed to parse deposit events', { error });
+      this.logger.error('Failed to parse deposit events', { error });
+      throw new ContractError('Failed to extract deposit ID from transaction events', { error });
     }
   }
 
@@ -586,7 +636,7 @@ function loadTestConfiguration(): TestConfig {
       privateKey: process.env.PRIVATE_KEY,
       nearBridgeAddress: process.env.NEAR_BRIDGE || process.env.RESOLVER_ADDRESS,
       transferAmount: process.env.TRANSFER_AMOUNT || '0.01',
-      timelock: parseInt(process.env.TIMELOCK || '3600'),
+      timelock: parseInt(process.env.TIMELOCK_DURATION || '3600'),
       recipient: process.env.RECIPIENT || 'fusionswap.testnet',
       logLevel: process.env.LOG_LEVEL || 'info'
     };

@@ -73,6 +73,7 @@ export class MockNearProvider {
   private mockError: Error | null = null;
   private mockBlock: MockNearBlock | null = null;
   private mockTransactionOutcome: MockNearTransaction | null = null;
+  private mockQueryResults: Map<string, any> = new Map();
 
   async status(): Promise<any> {
     if (this.mockError) {
@@ -183,6 +184,14 @@ export class MockNearProvider {
     if (params.request_type === 'call_function') {
       const { method_name, args_base64 } = params;
       
+      // Check if there's a mock result for this method
+      if (this.mockQueryResults.has(method_name)) {
+        const result = this.mockQueryResults.get(method_name);
+        return {
+          result: Buffer.from(JSON.stringify(result)).toString('base64')
+        };
+      }
+      
       if (method_name === 'get_escrow_details') {
         const args = JSON.parse(Buffer.from(args_base64, 'base64').toString());
         return {
@@ -196,6 +205,24 @@ export class MockNearProvider {
             status: 'active',
             created_at: Date.now()
           })).toString('base64')
+        };
+      }
+      
+      if (method_name === 'get_orders_by_taker') {
+        const args = JSON.parse(Buffer.from(args_base64, 'base64').toString());
+        const mockEscrows = [{
+          orderId: 'order_1',
+          recipient: args.taker,
+          status: 'active',
+          initiator: 'initiator.testnet',
+          amount: '1000000000000000000000000',
+          secret_hash: '0x' + 'a'.repeat(64),
+          timelock: Date.now() + 86400000,
+          created_at: Date.now()
+        }];
+        
+        return {
+          result: Buffer.from(JSON.stringify(mockEscrows)).toString('base64')
         };
       }
 
@@ -265,6 +292,29 @@ export class MockNearProvider {
   setMockTransactionOutcome(transaction: MockNearTransaction): void {
     this.mockTransactionOutcome = transaction;
   }
+
+  // Add missing mock method for testing
+  setMockTransactionReceipt(receipt: any): void {
+    // Convert receipt to the expected format if needed
+    this.mockTransactionOutcome = {
+      transaction_outcome: {
+        id: receipt.transactionHash || 'mock-tx-hash',
+        outcome: {
+          status: { SuccessValue: '' },
+          logs: receipt.logs || [],
+          receipt_ids: receipt.receiptIds || [],
+          gas_burnt: receipt.gasBurnt || 0,
+          tokens_burnt: receipt.tokensBurnt || '0'
+        }
+      },
+      receipts_outcome: []
+    };
+  }
+
+  // Set mock query result for testing
+  setMockQueryResult(methodName: string, result: any): void {
+    this.mockQueryResults.set(methodName, result);
+  }
 }
 
 export class MockNearConnection {
@@ -281,150 +331,224 @@ export class MockNearConnection {
   }
 }
 
+// Extend the Function type to include our custom properties
+type MockFunction<T extends (...args: any[]) => any> = T & {
+  original?: T;
+};
+
 export class MockNearAccount {
   public accountId: string;
   public connection: MockNearConnection;
-  private balance = '1000000000000000000000000'; // 1000 NEAR
-  private mockFunctionCallResult: any = null;
-  private mockError: Error | null = null;
+  private _balance = '1000000000000000000000000'; // 1000 NEAR
+  private _mockFunctionCallResult: any = null;
+  private _mockError: Error | null = null;
+  
+  // Track function calls for testing
+  public functionCallCalls: any[] = [];
+  public viewFunctionCalls: Array<{contractId: string, methodName: string, args: any}> = [];
+  
+  // Store original implementations
+  private originalFunctionCall: MockFunction<typeof this.functionCall>;
+  private originalViewFunction: MockFunction<typeof this.viewFunction>;
 
   constructor(accountId: string, connection?: MockNearConnection) {
     this.accountId = accountId;
-    this.connection = connection || new MockNearConnection();
+    this.connection = connection || new MockNearConnection('testnet');
+    
+    // Store original implementations
+    this.originalFunctionCall = this.functionCall.bind(this);
+    this.originalViewFunction = this.viewFunction.bind(this);
   }
 
-  // Mock control methods for testing
+  // Mock view result setter for testing
+  setMockViewResult(result: any): void {
+    this._mockFunctionCallResult = result;
+    // Store the result to be returned by viewFunction
+    this.viewFunction = async () => result;
+  }
+
+  // Mock transaction receipt setter for testing
+  setMockTransactionReceipt(receipt: any): void {
+    this._mockFunctionCallResult = receipt;
+    // Store the receipt to be returned by functionCall
+    this.functionCall = async () => receipt;
+  }
+
+  // Set mock function call result with detailed transaction response
   setMockFunctionCallResult(result: any): void {
-    this.mockFunctionCallResult = result;
-    this.mockError = null;
+    this._mockFunctionCallResult = result;
+    
+    // Create a mock response that matches the expected transaction response format
+    const mockResponse = {
+      transaction: {
+        hash: 'mock-tx-hash',
+        signer_id: this.accountId,
+        receiver_id: 'mock-contract.testnet',
+        actions: [{
+          FunctionCall: {
+            method_name: 'mock_method',
+            args: JSON.stringify({}),
+            gas: 300000000000000,
+            deposit: '0'
+          }
+        }]
+      },
+      status: { SuccessValue: '' },
+      transaction_outcome: {
+        id: 'mock-tx-hash',
+        outcome: {
+          status: { SuccessValue: '' },
+          logs: [],
+          receipt_ids: [],
+          gas_burnt: 0,
+          tokens_burnt: '0'
+        }
+      },
+      receipts_outcome: []
+    };
+    
+    // Merge the mock response with the provided result
+    const mergedResponse = { ...mockResponse, ...result };
+    
+    // Set up the mock implementation
+    this.functionCall = async () => mergedResponse;
   }
 
-  setMockError(error: Error): void {
-    this.mockError = error;
-    this.mockFunctionCallResult = null;
-  }
+  // Mock function call implementation
+  public functionCall = async (options: any): Promise<any> => {
+    this.functionCallCalls.push(options);
+    
+    if (this._mockError) {
+      throw this._mockError;
+    }
+    
+    // Simulate transaction receipt with proper typing
+    interface MockReceipt {
+      transactionHash: string;
+      logs: string[];
+      receiptIds: string[];
+      gasBurnt: number;
+      tokensBurnt: string;
+    }
+    
+    const receipt: MockReceipt = {
+      transactionHash: 'mock-tx-hash',
+      logs: [],
+      receiptIds: [],
+      gasBurnt: 0,
+      tokensBurnt: '0'
+    };
+    
+    // Generate mock event log based on method name
+    const eventLog = `EVENT_JSON:{"standard":"nep171","version":"1.0.0","event":"${options.methodName}","data":${JSON.stringify(options.args || {})}}`;
+    receipt.logs = [eventLog];
+    
+    return {
+      transaction: {
+        hash: receipt.transactionHash,
+        signer_id: this.accountId,
+        receiver_id: options.contractId,
+        actions: [{
+          FunctionCall: {
+            method_name: options.methodName,
+            args: JSON.stringify(options.args || {}),
+            gas: options.gas || 300000000000000,
+            deposit: options.attachedDeposit || '0'
+          }
+        }]
+      },
+      status: { SuccessValue: '' },
+      transaction_outcome: {
+        id: receipt.transactionHash,
+        outcome: {
+          status: { SuccessValue: '' },
+          logs: receipt.logs,
+          receipt_ids: receipt.receiptIds,
+          gas_burnt: receipt.gasBurnt,
+          tokens_burnt: receipt.tokensBurnt
+        }
+      },
+      receipts_outcome: []
+    };
+  };
+
+  // Mock implementation for view functions
+  public viewFunction = async (contractId: string, methodName: string, args: any = {}): Promise<any> => {
+    this.viewFunctionCalls.push({contractId, methodName, args});
+    
+    if (this._mockError) {
+      throw this._mockError;
+    }
+    
+    // Return different mock data based on method name
+    switch (methodName) {
+      case 'get_escrow':
+        return {
+          id: args.escrow_id || 'test-escrow',
+          initiator: 'test.near',
+          recipient: 'recipient.testnet',
+          amount: '1000000000000000000',
+          secret_hash: 'a'.repeat(64),
+          timelock: Math.floor(Date.now() / 1000) + 86400, // 1 day from now
+          status: 'active',
+          created_at: Math.floor(Date.now() / 1000)
+        };
+      case 'get_escrow_by_secret_hash':
+        return {
+          id: 'escrow-by-hash',
+          initiator: 'test.near',
+          recipient: 'recipient.testnet',
+          amount: '1000000000000000000',
+          secret_hash: args.secret_hash || 'a'.repeat(64),
+          timelock: Math.floor(Date.now() / 1000) + 86400,
+          status: 'active',
+          created_at: Math.floor(Date.now() / 1000)
+        };
+      default:
+        return this._mockFunctionCallResult || { success: true };
+    }
+  };
 
   async state(): Promise<any> {
     return {
-      amount: this.balance,
+      amount: this._balance,
+      block_hash: 'mock-block-hash',
+      block_height: 12345,
+      code_hash: 'mock-code-hash',
       locked: '0',
-      code_hash: '11111111111111111111111111111111',
-      storage_usage: 1000,
       storage_paid_at: 0,
-      block_height: 100000000,
-      block_hash: '0x' + Math.random().toString(16).substr(2, 64)
+      storage_usage: 1000
     };
   }
 
-  async functionCall(options: {
-    contractId: string;
-    methodName: string;
-    args: any;
-    gas?: bigint;
-    attachedDeposit?: bigint;
-  }): Promise<any> {
-    // Check for mock error first
-    if (this.mockError) {
-      throw this.mockError;
-    }
-
-    // Return mock result if set
-    if (this.mockFunctionCallResult !== null) {
-      return this.mockFunctionCallResult;
-    }
-
-    const txHash = Math.random().toString(16).substr(2, 64);
-    
-    // Create mock transaction result
-    const transaction: MockNearTransaction = {
-      transaction_outcome: {
-        id: txHash,
-        outcome: {
-          status: { SuccessValue: 'dGVzdA==' },
-          logs: this.generateEventLogs(options.methodName, options.args),
-          receipt_ids: [Math.random().toString(16).substr(2, 64)],
-          gas_burnt: Number(options.gas || BigInt(1000000)),
-          tokens_burnt: '1000000000000000000000'
-        }
-      },
-      receipts_outcome: [{
-        id: Math.random().toString(16).substr(2, 64),
-        outcome: {
-          status: { SuccessValue: 'dGVzdA==' },
-          logs: [],
-          gas_burnt: 500000,
-          tokens_burnt: '500000000000000000000'
-        }
-      }]
-    };
-
-    this.connection.provider.addTransaction(txHash, transaction);
-
-    return {
-      transaction_outcome: transaction.transaction_outcome,
-      receipts_outcome: transaction.receipts_outcome
-    };
+  // Mock balance getter
+  async getBalance(): Promise<string> {
+    return this._balance;
   }
-
-  async viewFunction(_contractId: string, methodName: string, args: any = {}): Promise<any> {
-    if (methodName === 'get_escrow_details') {
-      return {
-        id: args.order_id || 'test_order',
-        initiator: 'initiator.testnet',
-        recipient: 'recipient.testnet',
-        amount: '1000000000000000000000000',
-        secret_hash: '0x' + '3'.repeat(64),
-        timelock: Date.now() + 86400000,
-        status: 'active',
-        created_at: Date.now()
-      };
-    }
-
-    if (methodName === 'get_all_escrows') {
-      return [
-        {
-          id: 'order_1',
-          initiator: 'initiator.testnet',
-          recipient: 'recipient.testnet',
-          amount: '1000000000000000000000000',
-          secret_hash: '0x' + '3'.repeat(64),
-          timelock: Date.now() + 86400000,
-          status: 'active',
-          created_at: Date.now()
-        }
-      ];
-    }
-
-    return null;
-  }
-
-  private generateEventLogs(methodName: string, args: any): string[] {
-    const logs: string[] = [];
-
-    if (methodName === 'create_escrow') {
-      logs.push(`EVENT_JSON:{"standard":"escrow","version":"1.0.0","event":"swap_order_created","data":{"order_id":"${Math.random().toString(36).substr(2, 9)}","initiator":"${this.accountId}","recipient":"${args.recipient}","amount":"${args.amount || '1000000000000000000000000'}","secret_hash":"${args.hashlock || '0x' + '3'.repeat(64)}","timelock":${Date.now() + (args.timelock_duration || 86400) * 1000}}}`);
-    }
-
-    if (methodName === 'complete_swap') {
-      logs.push(`EVENT_JSON:{"standard":"escrow","version":"1.0.0","event":"swap_order_completed","data":{"order_id":"${args.order_id}","secret":"${args.secret || 'test_secret_' + Math.random().toString(36).substr(2, 32)}","completed_by":"${this.accountId}","completed_at":${Date.now()}}}`);
-    }
-
-    if (methodName === 'refund_escrow') {
-      logs.push(`EVENT_JSON:{"standard":"escrow","version":"1.0.0","event":"swap_order_refunded","data":{"order_id":"${args.order_id}","refunded_to":"${this.accountId}","refunded_at":${Date.now()}}}`);
-    }
-
-    return logs;
-  }
-
-  // Test helper methods
+  
+  // Mock control methods for testing
   setBalance(balance: string): void {
-    this.balance = balance;
+    this._balance = balance;
   }
-
-  getBalance(): string {
-    return this.balance;
+  
+  // Set mock error for testing error cases
+  setMockError(error: Error | null): void {
+    this._mockError = error;
+    this._mockFunctionCallResult = null;
+    
+    if (error) {
+      // Override methods to throw the error
+      this.functionCall = (async () => { throw error; }) as typeof this.functionCall;
+      this.viewFunction = (async () => { throw error; }) as typeof this.viewFunction;
+    } else {
+      // Restore original implementations
+      this.functionCall = this.originalFunctionCall;
+      this.viewFunction = this.originalViewFunction;
+    }
   }
 }
+
+// Mock NEAR utilities
 
 // Mock NEAR utilities
 export const mockNear = {

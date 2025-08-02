@@ -3,7 +3,7 @@
  * Tests NEAR contract interactions, escrow operations, and error handling
  */
 
-import { test, describe } from 'node:test';
+import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { NearContractService, NearSwapOrderParams, NearEscrowUpdateParams } from '../../src/services/NearContractService.js';
 import { ContractError, ValidationError } from '../../src/utils/errors.js';
@@ -17,12 +17,13 @@ describe('NearContractService', () => {
   const escrowContractId = 'escrow.testnet';
 
   // Setup before each test
-  test('should setup mock dependencies', () => {
+  beforeEach(() => {
     mockProvider = new MockNearProvider();
     mockConnection = new MockNearConnection(mockProvider);
     mockNearAccount = new MockNearAccount('test.testnet', mockConnection);
     nearContractService = new NearContractService(mockNearAccount as any, escrowContractId);
     
+    // Verify setup
     assert(nearContractService instanceof NearContractService);
     assert.strictEqual(typeof mockNearAccount, 'object');
     assert.strictEqual(typeof escrowContractId, 'string');

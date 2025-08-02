@@ -170,6 +170,18 @@ export class NearEventListener implements IEventListener {
     if (!handlers || typeof handlers !== 'object') {
       throw ErrorHandler.createValidationError('handlers', handlers, 'Event handlers object is required');
     }
+    
+    // Ensure at least one handler is defined
+    const hasAtLeastOneHandler = [
+      'onSwapOrderCreated',
+      'onSwapOrderCompleted',
+      'onSwapOrderRefunded',
+      'onTransactionProcessed'
+    ].some(handler => typeof handlers[handler as keyof NearEventHandlers] === 'function');
+    
+    if (!hasAtLeastOneHandler) {
+      throw ErrorHandler.createValidationError('handlers', handlers, 'At least one event handler must be provided');
+    }
   }
 
   private scheduleNextPoll(): void {
@@ -452,13 +464,36 @@ export class NearEventListener implements IEventListener {
     // Handle plain text logs that might contain event information
     // This is a simplified approach - real implementation might need more sophisticated parsing
     
-    if (log.includes('swap_order_created')) {
-      logger.debug('Detected swap order creation from text log', { log, txHash });
-      // Could parse additional details from the log text
-    } else if (log.includes('swap_order_completed')) {
-      logger.debug('Detected swap order completion from text log', { log, txHash });
-    } else if (log.includes('swap_order_refunded')) {
-      logger.debug('Detected swap order refund from text log', { log, txHash });
+    if (log.includes('Created swap order')) {
+      logger.info(' DETECTED SWAP ORDER CREATION!', { log, txHash, blockHeight });
+      
+      // Parse order details from log: "Created swap order order_46 for 2000000000000000000000 yoctoNEAR to recipient 0x..."
+      const orderMatch = log.match(/Created swap order (\w+) for (\d+) yoctoNEAR to recipient (0x[a-fA-F0-9]{40})/);
+      if (orderMatch) {
+        const [, orderId, amount, recipient] = orderMatch;
+        
+        const event: SwapOrderCreatedEvent = {
+          orderId,
+          initiator: '', // Will be filled from transaction details
+          recipient,
+          amount,
+          secretHash: '', // Will be filled from contract state
+          timelock: 0, // Will be filled from contract state
+          blockHeight,
+          transactionHash: txHash
+        };
+        
+        // Trigger the swap order created handler
+        if (this.handlers.onSwapOrderCreated) {
+          await this.safeHandleEvent('SwapOrderCreated', () =>
+            this.handlers.onSwapOrderCreated!(event)
+          );
+        }
+      }
+    } else if (log.includes('swap_order_completed') || log.includes('Completed swap order')) {
+      logger.info(' DETECTED SWAP ORDER COMPLETION!', { log, txHash, blockHeight });
+    } else if (log.includes('swap_order_refunded') || log.includes('Refunded swap order')) {
+      logger.info(' DETECTED SWAP ORDER REFUND!', { log, txHash, blockHeight });
     }
   }
 

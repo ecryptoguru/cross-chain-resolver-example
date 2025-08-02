@@ -3,8 +3,7 @@
  * Tests Ethereum contract interactions, escrow operations, and error handling
  */
 
-import { test, describe } from 'node:test';
-import assert from 'node:assert';
+import { describe, test, expect } from '@jest/globals';
 import { EthereumContractService, EscrowSearchParams } from '../../src/services/EthereumContractService.js';
 import { EthereumEscrowDetails } from '../../src/types/interfaces.js';
 import { ContractError, ValidationError } from '../../src/utils/errors.js';
@@ -34,27 +33,27 @@ describe('EthereumContractService', () => {
     setupTest();
     
     // Verify mocks and service are properly initialized
-    assert(mockProvider);
-    assert(mockSigner);
-    assert(ethereumContractService);
+    expect(mockProvider).toBeDefined();
+    expect(mockSigner).toBeDefined();
+    expect(ethereumContractService).toBeDefined();
   });
 
   describe('Constructor', () => {
     test('should initialize with valid parameters', () => {
       const service = new EthereumContractService(mockProvider, mockSigner, factoryAddress);
-      assert(service instanceof EthereumContractService);
+      expect(service).toBeInstanceOf(EthereumContractService);
     });
 
     test('should throw error for invalid provider', () => {
-      assert.throws(() => {
+      expect(() => {
         new EthereumContractService(null as any, mockSigner, factoryAddress);
-      }, ValidationError);
+      }).toThrow(ValidationError);
     });
 
     test('should throw error for invalid factory address', () => {
-      assert.throws(() => {
+      expect(() => {
         new EthereumContractService(mockProvider, mockSigner, 'invalid_address');
-      }, ValidationError);
+      }).toThrow(ValidationError);
     });
   });
 
@@ -80,17 +79,16 @@ describe('EthereumContractService', () => {
 
       const details = await ethereumContractService.getContractDetails(escrowAddress);
       
-      assert(details);
-      assert.strictEqual(details.status, 1);
-      assert.strictEqual(details.amount.toString(), '1000000000000000000');
+      expect(details).toBeDefined();
+      expect(details.status).toBe(1);
+      expect(details.amount.toString()).toBe('1000000000000000000');
     });
 
     test('should throw error for invalid address', async () => {
       setupTest();
-      await assert.rejects(
-        ethereumContractService.getContractDetails('invalid_address'),
-        ValidationError
-      );
+      await expect(
+        ethereumContractService.getContractDetails('invalid_address')
+      ).rejects.toThrow(ContractError);
     });
   });
 
@@ -118,21 +116,19 @@ describe('EthereumContractService', () => {
 
       const result = await ethereumContractService.executeTransaction(contractAddress, method, params);
       
-      assert(result);
-      assert.strictEqual(result.hash, '0xtx123');
+      expect(result).toBeDefined();
+      expect(result.hash).toBe('0xtx123');
     });
 
     test('should validate input parameters', async () => {
       setupTest();
-      await assert.rejects(
+      await expect(
         ethereumContractService.executeTransaction('invalid_address', 'method', []),
-        ValidationError
-      );
+      ).rejects.toThrow(ValidationError);
 
-      await assert.rejects(
+      await expect(
         ethereumContractService.executeTransaction(factoryAddress, '', []),
-        ValidationError
-      );
+      ).rejects.toThrow(ValidationError);
     });
   });
 
@@ -168,16 +164,15 @@ describe('EthereumContractService', () => {
 
       const escrow = await ethereumContractService.findEscrowBySecretHash(secretHash);
       
-      assert(escrow);
-      assert.strictEqual(escrow.secretHash, secretHash);
+      expect(escrow).toBeDefined();
+      expect(escrow?.secretHash).toBe(secretHash);
     });
 
     test('should validate secret hash', async () => {
       setupTest();
-      await assert.rejects(
+      await expect(
         ethereumContractService.findEscrowBySecretHash(''),
-        ValidationError
-      );
+      ).rejects.toThrow(ValidationError);
     });
   });
 
@@ -212,16 +207,15 @@ describe('EthereumContractService', () => {
 
       const receipt = await ethereumContractService.executeWithdrawal(escrowAddress, secret);
       
-      assert(receipt);
-      assert.strictEqual(receipt.status, 1);
+      expect(receipt).toBeDefined();
+      expect(receipt.status).toBe(1);
     });
 
     test('should validate withdrawal parameters', async () => {
       setupTest();
-      await assert.rejects(
+      await expect(
         ethereumContractService.executeWithdrawal('', 'secret'),
-        ValidationError
-      );
+      ).rejects.toThrow(ValidationError);
     });
   });
 
@@ -255,8 +249,8 @@ describe('EthereumContractService', () => {
 
       const receipt = await ethereumContractService.executeRefund(escrowAddress);
       
-      assert(receipt);
-      assert.strictEqual(receipt.status, 1);
+      expect(receipt).toBeDefined();
+      expect(receipt.status).toBe(1);
     });
 
     test('should check timelock before refund', async () => {
@@ -273,10 +267,9 @@ describe('EthereumContractService', () => {
       (mockEscrowContract as any).getDetails = async () => mockDetails;
       mockProvider.setMockContract(mockEscrowContract);
 
-      await assert.rejects(
+      await expect(
         ethereumContractService.executeRefund(escrowAddress),
-        ContractError
-      );
+      ).rejects.toThrow(ContractError);
     });
   });
 
@@ -285,10 +278,9 @@ describe('EthereumContractService', () => {
       setupTest();
       mockProvider.setMockError(new Error('Network error'));
 
-      await assert.rejects(
+      await expect(
         ethereumContractService.getContractDetails(factoryAddress),
-        ContractError
-      );
+      ).rejects.toThrow(ContractError);
     });
   });
 
@@ -311,7 +303,7 @@ describe('EthereumContractService', () => {
       };
 
       const matches = (ethereumContractService as any).matchesSearchCriteria(details, params);
-      assert.strictEqual(matches, true);
+      expect(matches).toBe(true);
     });
   });
 });
