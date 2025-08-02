@@ -310,12 +310,19 @@ export class NearEventListener implements IEventListener {
 
   private isRelevantTransaction(tx: any): boolean {
     // Check if transaction involves our escrow contract
-    return tx.receiver_id === this.escrowContractId || 
-           tx.signer_id === this.escrowContractId;
+    // Include transactions TO the escrow contract (function calls)
+    return tx.receiver_id === this.escrowContractId;
   }
 
   private async processTransaction(tx: any, blockHeight: number): Promise<void> {
     try {
+      logger.info('🔍 Processing relevant NEAR transaction', {
+        txHash: tx.hash,
+        signer: tx.signer_id,
+        receiver: tx.receiver_id,
+        blockHeight
+      });
+      
       // Get full transaction status to access logs and outcomes
       const txStatus = await this.provider.txStatus(tx.hash, tx.signer_id);
       
@@ -462,23 +469,70 @@ export class NearEventListener implements IEventListener {
 
   private async handleTextLog(log: string, txHash: string, blockHeight: number): Promise<void> {
     // Handle plain text logs that might contain event information
-    // This is a simplified approach - real implementation might need more sophisticated parsing
     
     if (log.includes('Created swap order')) {
-      logger.info(' DETECTED SWAP ORDER CREATION!', { log, txHash, blockHeight });
+      logger.info('\n🎉 ===============================================');
+      logger.info('🎯 SWAP ORDER DETECTED IN LIVE DEMO!');
+      logger.info('🎉 ===============================================');
+      logger.info('📝 Log Details:', { log, txHash, blockHeight });
       
       // Parse order details from log: "Created swap order order_46 for 2000000000000000000000 yoctoNEAR to recipient 0x..."
       const orderMatch = log.match(/Created swap order (\w+) for (\d+) yoctoNEAR to recipient (0x[a-fA-F0-9]{40})/);
       if (orderMatch) {
         const [, orderId, amount, recipient] = orderMatch;
         
+        logger.info('🔍 Parsed Order Details:', {
+          orderId,
+          amount,
+          recipient,
+          blockHeight,
+          txHash
+        });
+        
+        let secretHash = '';
+        let timelock = 0;
+        let initiator = '';
+        
+        try {
+          logger.info('📋 Fetching order details from contract...', { orderId });
+          const orderDetails = await (this.provider as any).query({
+            request_type: 'call_function',
+            finality: 'final',
+            account_id: this.escrowContractId,
+            method_name: 'get_order',
+            args_base64: Buffer.from(JSON.stringify({ order_id: orderId })).toString('base64')
+          });
+          
+          if (orderDetails && 'result' in orderDetails) {
+            const resultBytes = orderDetails.result as number[];
+            const resultString = String.fromCharCode(...resultBytes);
+            const orderData = JSON.parse(resultString);
+            
+            secretHash = orderData.hashlock || '';
+            timelock = orderData.timelock || 0;
+            initiator = orderData.initiator || '';
+            
+            logger.info('✅ Contract state fetched successfully:', {
+              orderId,
+              secretHash: secretHash.substring(0, 10) + '...',
+              timelock,
+              initiator
+            });
+          }
+        } catch (error) {
+          logger.warn('⚠️ Failed to fetch order details from contract:', {
+            orderId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        
         const event: SwapOrderCreatedEvent = {
           orderId,
-          initiator: '', // Will be filled from transaction details
+          initiator,
           recipient,
           amount,
-          secretHash: '', // Will be filled from contract state
-          timelock: 0, // Will be filled from contract state
+          secretHash,
+          timelock,
           blockHeight,
           transactionHash: txHash
         };
@@ -491,9 +545,9 @@ export class NearEventListener implements IEventListener {
         }
       }
     } else if (log.includes('swap_order_completed') || log.includes('Completed swap order')) {
-      logger.info(' DETECTED SWAP ORDER COMPLETION!', { log, txHash, blockHeight });
+      logger.info('🎯 DETECTED SWAP ORDER COMPLETION!', { log, txHash, blockHeight });
     } else if (log.includes('swap_order_refunded') || log.includes('Refunded swap order')) {
-      logger.info(' DETECTED SWAP ORDER REFUND!', { log, txHash, blockHeight });
+      logger.info('🎯 DETECTED SWAP ORDER REFUND!', { log, txHash, blockHeight });
     }
   }
 

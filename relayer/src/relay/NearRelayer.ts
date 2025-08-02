@@ -195,15 +195,25 @@ export class NearRelayer implements IMessageProcessor {
         blockHeight: event.blockHeight
       });
 
-      // For SwapOrderCreated, we just log and track the order
-      // The actual NEAR→Ethereum withdrawal happens when the order is completed
-      logger.info('NEAR swap order created, waiting for completion to process withdrawal', {
+      // For NEAR→Ethereum transfer: Create corresponding Ethereum escrow
+      logger.info('NEAR swap order created, creating corresponding Ethereum escrow', {
         orderId: event.orderId,
         secretHash: event.secretHash
       });
 
-      // Optionally, we could verify the corresponding Ethereum escrow exists
-      await this.verifyCorrespondingEthereumEscrow(event.secretHash, event.orderId);
+      // Check if Ethereum escrow already exists
+      const existingEscrow = await this.findEthereumEscrowBySecretHash(event.secretHash);
+      
+      if (!existingEscrow) {
+        // Create Ethereum escrow for NEAR→ETH transfer
+        await this.createEthereumEscrowFromNearOrder(event);
+      } else {
+        logger.info('Ethereum escrow already exists for this secret hash', {
+          orderId: event.orderId,
+          secretHash: event.secretHash,
+          escrowAddress: existingEscrow
+        });
+      }
 
       logger.info('SwapOrderCreated event processed successfully', {
         orderId: event.orderId
@@ -820,6 +830,91 @@ export class NearRelayer implements IMessageProcessor {
         error as Error,
         'Failed to execute Ethereum withdrawal',
         { escrowAddress, amount, secret: '***redacted***' }
+      );
+    }
+  }
+
+  /**
+   * Create Ethereum escrow from NEAR order for NEAR→ETH transfer
+   */
+  private async createEthereumEscrowFromNearOrder(event: SwapOrderCreatedEvent): Promise<void> {
+    try {
+      logger.info('Creating Ethereum escrow from NEAR order', {
+        orderId: event.orderId,
+        recipient: event.recipient,
+        amount: event.amount,
+        secretHash: event.secretHash
+      });
+
+      // Get full order details from NEAR contract
+      const orderDetails = await this.contractService.getEscrowDetails(event.orderId);
+      if (!orderDetails) {
+        throw new RelayerError(
+          `Could not get order details for NEAR order ${event.orderId}`,
+          'ORDER_DETAILS_NOT_FOUND',
+          { orderId: event.orderId }
+        );
+      }
+
+      // Convert NEAR amount to Wei (assuming 1:1 conversion for demo)
+      // In production, you'd use proper exchange rates
+      const amountInWei = ethers.utils.parseEther(ethers.utils.formatUnits(event.amount, 24)); // NEAR has 24 decimals
+
+      // Prepare escrow immutables for createDstEscrow
+      const immutables = [
+        1, // chainId (example)
+        ethers.constants.AddressZero, // token (ETH)
+        event.recipient, // recipient
+        amountInWei, // amount
+        event.secretHash, // secretHash
+        ethers.utils.keccak256(ethers.utils.toUtf8Bytes('NEAR')), // srcChain
+        orderDetails.timelock || Math.floor(Date.now() / 1000) + 3600, // timelock
+        0, // srcCancellationTimestamp
+        0, // dstCancellationTimestamp
+        1, // status (active)
+        0, // nonce
+        0, // fee
+        ethers.utils.formatBytes32String(''), // data1
+        ethers.utils.formatBytes32String('') // data2
+      ];
+
+      // Create Ethereum escrow using factory
+      const tx = await this.ethereumContractService.executeTransaction(
+        this.config.ethereumEscrowFactoryAddress,
+        'createDstEscrow',
+        [immutables, 0] // immutables and srcCancellationTimestamp
+      );
+
+      const receipt = await tx.wait();
+      
+      // Extract escrow address from event logs
+      let escrowAddress = '';
+      for (const log of receipt.logs) {
+        try {
+          const parsed = this.ethereumContractService['factoryContract'].interface.parseLog(log);
+          if (parsed.name === 'EscrowCreated') {
+            escrowAddress = parsed.args.escrow;
+            break;
+          }
+        } catch (e) {
+          // Skip logs that don't match our interface
+          continue;
+        }
+      }
+
+      logger.info('Ethereum escrow created successfully from NEAR order', {
+        orderId: event.orderId,
+        escrowAddress,
+        recipient: event.recipient,
+        amount: amountInWei.toString(),
+        secretHash: event.secretHash
+      });
+
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to create Ethereum escrow from NEAR order',
+        { orderId: event.orderId }
       );
     }
   }

@@ -300,7 +300,8 @@ class ModernNearToEthTransferTester {
     const secret = crypto.randomBytes(32).toString('hex');
     
     // Create Ethereum-compatible hashlock using keccak256
-    const secretHash = ethers.keccak256(ethers.toUtf8Bytes(secret));
+    // Hash the raw bytes, not the hex string as UTF-8
+    const secretHash = ethers.keccak256('0x' + secret);
     
     this.logger.info('Generated secret and hashlock', {
       secretLength: secret.length,
@@ -525,13 +526,76 @@ class ModernNearToEthTransferTester {
   }
 
   private async simulateRelayerProcessing(orderId: string): Promise<void> {
-    this.logger.info('Simulating relayer processing delay', { orderId });
+    this.logger.info('Waiting for relayer to process NEAR transaction', { orderId });
     
-    // In a real implementation, this would wait for the relayer to detect the NEAR transaction
-    // and create a corresponding deposit on Ethereum. For now, we simulate this with a delay.
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    this.logger.info('Relayer processing simulation completed', { orderId });
+    try {
+      // Get the current NEAR block height to know what the relayer needs to process
+      const status = await this.rpcProvider.status();
+      const currentBlockHeight = status.sync_info.latest_block_height;
+      
+      this.logger.info('Current NEAR network status', {
+        currentBlockHeight,
+        orderId
+      });
+      
+      // Wait for relayer to have time to process recent blocks
+      // The relayer polls every 3 seconds, so we wait longer to ensure it catches up
+      const relayerProcessingTime = 30000; // 30 seconds
+      
+      this.logger.info('Waiting for relayer to process transaction block', {
+        orderId,
+        waitTime: relayerProcessingTime,
+        currentBlockHeight
+      });
+      
+      await new Promise(resolve => setTimeout(resolve, relayerProcessingTime));
+      
+      // Additional check: try to verify if Ethereum escrow might have been created
+      // by checking for recent deposit events (this is optional validation)
+      try {
+        const provider = new ethers.JsonRpcProvider(this.config.ethereumRpcUrl);
+        const bridgeABI = this.getBridgeABI();
+        const bridgeContract = new ethers.Contract(this.config.nearBridgeAddress, bridgeABI, provider);
+        
+        // Check for recent deposit events in the last 20 blocks
+        const currentEthBlock = await provider.getBlockNumber();
+        const fromBlock = Math.max(0, currentEthBlock - 20);
+        
+        const filter = bridgeContract.filters.DepositInitiated();
+        const events = await bridgeContract.queryFilter(filter, fromBlock);
+        
+        this.logger.info('Checked for recent Ethereum deposit events', {
+          orderId,
+          recentDeposits: events.length,
+          ethBlockRange: `${fromBlock}-${currentEthBlock}`
+        });
+        
+        if (events.length > 0) {
+          this.logger.info('Found recent deposit events - relayer may have processed the transaction', {
+            orderId,
+            latestDepositBlock: events[events.length - 1].blockNumber
+          });
+        }
+        
+      } catch (ethCheckError) {
+        this.logger.warn('Could not check Ethereum deposit events', {
+          orderId,
+          error: ethCheckError instanceof Error ? ethCheckError.message : String(ethCheckError)
+        });
+      }
+      
+      this.logger.info('Relayer processing wait completed', { orderId });
+      
+    } catch (error) {
+      this.logger.error('Error during relayer processing wait', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      // Fall back to simple delay if NEAR status check fails
+      this.logger.info('Falling back to simple delay', { orderId });
+      await new Promise(resolve => setTimeout(resolve, 15000));
+    }
   }
 
   private async testWithdrawalFunctionality(secret: string): Promise<{ ethTxHash: string; withdrawalCompleted: boolean }> {
