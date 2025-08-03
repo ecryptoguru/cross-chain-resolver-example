@@ -102,8 +102,8 @@ export class DynamicAuctionService {
     const fromAmountBN = ethers.BigNumber.from(params.fromAmount);
     const outputAmount = this.calculateOutputAmount(fromAmountBN, adjustedRate, params);
     
-    // Calculate fees (1% market maker fee)
-    const feeAmount = outputAmount.div(100); // 1% fee
+    // Calculate fees (10% security deposit)
+    const feeAmount = outputAmount.div(10); // 10% security deposit
     const totalCost = outputAmount.add(feeAmount);
 
     logger.debug('Auction rate calculation', {
@@ -189,7 +189,7 @@ export class DynamicAuctionService {
     
     const fromAmountBN = ethers.BigNumber.from(params.fromAmount);
     const outputAmount = this.calculateOutputAmount(fromAmountBN, finalRate, params);
-    const feeAmount = outputAmount.div(100);
+    const feeAmount = outputAmount.div(10); // 10% security deposit
     const totalCost = outputAmount.add(feeAmount);
 
     return {

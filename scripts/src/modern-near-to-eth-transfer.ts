@@ -539,8 +539,8 @@ class ModernNearToEthTransferTester {
       });
       
       // Wait for relayer to have time to process recent blocks
-      // The relayer polls every 3 seconds, so we wait longer to ensure it catches up
-      const relayerProcessingTime = 1000; // 1 seconds
+      // The relayer now polls every 15 seconds, so we wait longer to ensure it catches up
+      const relayerProcessingTime = 30000; // 30 seconds (optimized for reduced RPC calls)
       
       this.logger.info('Waiting for relayer to process transaction block', {
         orderId,
@@ -557,9 +557,9 @@ class ModernNearToEthTransferTester {
         const bridgeABI = this.getBridgeABI();
         const bridgeContract = new ethers.Contract(this.config.nearBridgeAddress, bridgeABI, provider);
         
-        // Check for recent deposit events in the last 20 blocks
+        // Check for recent deposit events in the last 10 blocks (optimized for fewer RPC calls)
         const currentEthBlock = await provider.getBlockNumber();
-        const fromBlock = Math.max(0, currentEthBlock - 20);
+        const fromBlock = Math.max(0, currentEthBlock - 10);
         
         const filter = bridgeContract.filters.DepositInitiated();
         const events = await bridgeContract.queryFilter(filter, fromBlock);

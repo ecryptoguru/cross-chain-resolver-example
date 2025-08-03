@@ -10,9 +10,9 @@ import { logger } from '../utils/logger.js';
 
 // ABI definitions for contracts
 const EscrowFactoryABI = [
-  'function createDstEscrow(tuple(uint256,address,address,uint256,bytes32,bytes32,uint256,uint256,uint256,uint8,uint256,uint256,bytes32,bytes32) immutables, uint256 srcCancellationTimestamp) external payable returns (address)',
-  'function addressOfEscrowSrc(tuple(uint256,address,address,uint256,bytes32,bytes32,uint256,uint256,uint256,uint8,uint256,uint256,bytes32,bytes32) immutables) external view returns (address)',
-  'event EscrowCreated(address indexed escrow, address indexed initiator, address token, uint256 amount, string targetChain, string targetAddress)'
+  'function createDstEscrow(tuple(bytes32 orderHash, bytes32 hashlock, address maker, address taker, address token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) dstImmutables, uint256 srcCancellationTimestamp) external payable returns (address)',
+  'function addressOfEscrowSrc(tuple(bytes32 orderHash, bytes32 hashlock, address maker, address taker, address token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) immutables) external view returns (address)',
+  'event DstEscrowCreated(address indexed escrow, address indexed initiator, address token, uint256 amount, string targetChain, string targetAddress)'
 ] as const;
 
 const BridgeABI = [
@@ -208,38 +208,55 @@ export class EthereumEventListener {
   private async pollForEvents(): Promise<void> {
     try {
       const currentBlock = await this.provider.getBlockNumber();
-      
-      if (currentBlock <= this.lastProcessedBlock) {
-        return; // No new blocks
+      const fromBlock = this.lastProcessedBlock + 1;
+      const toBlock = currentBlock;
+
+      if (fromBlock > toBlock) {
+        // No new blocks to process
+        return;
       }
 
-      const fromBlock = this.lastProcessedBlock + 1;
-      const toBlock = Math.min(currentBlock, fromBlock + 100); // Process max 100 blocks at once
+      // Limit the number of blocks processed at once to avoid overwhelming the RPC
+      const maxBlocksPerPoll = 5; // Reduced from 10 to minimize RPC load
+      const actualToBlock = Math.min(toBlock, fromBlock + maxBlocksPerPoll - 1);
 
       logger.debug('Polling for Ethereum events', {
         fromBlock,
-        toBlock,
-        blocksToProcess: toBlock - fromBlock + 1
+        toBlock: actualToBlock,
+        blocksToProcess: actualToBlock - fromBlock + 1
       });
 
-      // Query events from both contracts
-      await Promise.all([
-        this.processFactoryEvents(fromBlock, toBlock),
-        this.processBridgeEvents(fromBlock, toBlock)
-      ]);
-
-      this.lastProcessedBlock = toBlock;
-
-      if (toBlock < currentBlock) {
-        // More blocks to process, schedule immediate next poll
-        setImmediate(() => this.pollForEvents());
+      // Process events sequentially to avoid RPC overload
+      try {
+        // Process factory events first (most important for escrow creation)
+        await this.processFactoryEvents(fromBlock, actualToBlock);
+      } catch (factoryError) {
+        logger.warn('Factory event processing failed, continuing with bridge events', {
+          error: factoryError instanceof Error ? factoryError.message : String(factoryError),
+          fromBlock,
+          toBlock: actualToBlock
+        });
       }
+      
+      try {
+        // Process bridge events
+        await this.processBridgeEvents(fromBlock, actualToBlock);
+      } catch (bridgeError) {
+        logger.warn('Bridge event processing failed', {
+          error: bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
+          fromBlock,
+          toBlock: actualToBlock
+        });
+      }
+
+      this.lastProcessedBlock = actualToBlock;
+
     } catch (error) {
       throw new NetworkError(
         'Failed to poll for Ethereum events',
         'ethereum',
         'pollEvents',
-        { 
+        {
           lastProcessedBlock: this.lastProcessedBlock,
           error: error instanceof Error ? error.message : String(error)
         }
@@ -249,44 +266,99 @@ export class EthereumEventListener {
 
   private async processFactoryEvents(fromBlock: number, toBlock: number): Promise<void> {
     try {
-      const filter = this.factoryContract.filters.EscrowCreated();
+      // Add validation for block range
+      if (fromBlock > toBlock) {
+        logger.debug('Invalid block range for factory events', { fromBlock, toBlock });
+        return;
+      }
+
+      // Check if factory contract is properly initialized
+      if (!this.factoryContract || !this.factoryContract.address) {
+        logger.warn('Factory contract not properly initialized, skipping factory events');
+        return;
+      }
+
+      logger.debug('Processing factory events', { 
+        factoryAddress: this.factoryContract.address,
+        fromBlock, 
+        toBlock 
+      });
+
+      const filter = this.factoryContract.filters.DstEscrowCreated();
       const events = await this.factoryContract.queryFilter(filter, fromBlock, toBlock);
 
       for (const event of events) {
-        if (!event.args) continue;
+        if (!event.args) {
+          logger.debug('Skipping event with no args', { 
+            transactionHash: event.transactionHash,
+            blockNumber: event.blockNumber 
+          });
+          continue;
+        }
 
-        const escrowCreatedEvent: EscrowCreatedEvent = {
-          escrow: event.args.escrow,
-          initiator: event.args.initiator,
-          token: event.args.token,
-          amount: event.args.amount.toBigInt(),
-          targetChain: event.args.targetChain,
-          targetAddress: event.args.targetAddress,
-          blockNumber: event.blockNumber,
-          transactionHash: event.transactionHash
-        };
+        try {
+          const escrowCreatedEvent: EscrowCreatedEvent = {
+            escrow: event.args.escrow,
+            initiator: event.args.initiator,
+            token: event.args.token,
+            amount: event.args.amount.toBigInt(),
+            targetChain: event.args.targetChain,
+            targetAddress: event.args.targetAddress,
+            blockNumber: event.blockNumber,
+            transactionHash: event.transactionHash
+          };
 
-        if (this.handlers.onEscrowCreated) {
-          await this.safeHandleEvent('EscrowCreated', () => 
-            this.handlers.onEscrowCreated!(escrowCreatedEvent)
-          );
+          if (this.handlers.onEscrowCreated) {
+            await this.safeHandleEvent('DstEscrowCreated', () => 
+              this.handlers.onEscrowCreated!(escrowCreatedEvent)
+            );
+          }
+        } catch (eventError) {
+          logger.warn('Failed to process individual factory event', {
+            transactionHash: event.transactionHash,
+            blockNumber: event.blockNumber,
+            error: eventError instanceof Error ? eventError.message : String(eventError)
+          });
         }
       }
 
       if (events.length > 0) {
-        logger.debug('Processed EscrowCreated events', { 
+        logger.debug('Processed DstEscrowCreated events', { 
           count: events.length, 
           fromBlock, 
           toBlock 
         });
       }
     } catch (error) {
-      throw new ContractError(
-        'Failed to process factory events',
-        this.factoryContract.address,
-        'queryFilter',
-        { fromBlock, toBlock, error: error instanceof Error ? error.message : String(error) }
-      );
+      // More specific error handling
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      if (errorMessage.includes('network') || errorMessage.includes('timeout')) {
+        logger.warn('Network error processing factory events, will retry next poll', {
+          fromBlock,
+          toBlock,
+          error: errorMessage
+        });
+        throw new NetworkError(
+          'Network error processing factory events',
+          'ethereum',
+          'queryFilter',
+          { fromBlock, toBlock, error: errorMessage }
+        );
+      } else {
+        logger.error('Contract error processing factory events', {
+          factoryAddress: this.factoryContract?.address,
+          fromBlock,
+          toBlock,
+          error: errorMessage
+        });
+        throw new ContractError(
+          'Failed to process factory events',
+          this.factoryContract?.address || 'unknown',
+          'queryFilter',
+          { fromBlock, toBlock, error: errorMessage }
+        );
+      }
     }
   }
 

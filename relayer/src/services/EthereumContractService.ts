@@ -21,9 +21,11 @@ const EscrowABI = [
 ] as const;
 
 const EscrowFactoryABI = [
-  'function createDstEscrow(tuple(bytes32 orderHash, bytes32 hashlock, address maker, address taker, address token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) dstImmutables, uint256 srcCancellationTimestamp) external payable returns (address)',
-  'function addressOfEscrowSrc(tuple(bytes32 orderHash, bytes32 hashlock, address maker, address taker, address token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) immutables) external view returns (address)',
-  'event DstEscrowCreated(address escrow, bytes32 hashlock, address taker)'
+  // CRITICAL: Address custom type must be uint256 in ABI (per Solidity spec: user-defined types encoded as underlying type)
+  // 1inch Address type wraps uint256, so ABI must use uint256 for maker, taker, token
+  'function createDstEscrow(tuple(bytes32 orderHash, bytes32 hashlock, uint256 maker, uint256 taker, uint256 token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) dstImmutables, uint256 srcCancellationTimestamp) external payable returns (address)',
+  'function addressOfEscrowSrc(tuple(bytes32 orderHash, bytes32 hashlock, uint256 maker, uint256 taker, uint256 token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) immutables) external view returns (address)',
+  'event DstEscrowCreated(address escrow, bytes32 hashlock, uint256 taker)'
 ] as const;
 
 export interface EscrowSearchParams {
@@ -112,7 +114,7 @@ export class EthereumContractService implements IContractService {
       
       // Prepare transaction options
       const txOptions: any = {
-        gasLimit: 800000 // Manual gas limit to bypass estimation issues
+        gasLimit: 1500000 // Increased gas limit for escrow creation (was 800k, now 1.5M)
       };
       if (value && value.gt(0)) {
         txOptions.value = value;

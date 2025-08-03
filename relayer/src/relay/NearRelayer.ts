@@ -897,13 +897,20 @@ export class NearRelayer implements IMessageProcessor {
       // Convert NEAR nanosecond timelock to Ethereum second timelock
       // NEAR uses nanoseconds, Ethereum uses seconds
       const timelockInSeconds = orderDetails.timelock 
-        ? Math.floor(orderDetails.timelock / 1_000_000_000) // Convert nanoseconds to seconds
+        ? Math.floor(orderDetails.timelock / 1_000_000_000) // Convert NEAR timelock from nanoseconds to seconds
         : Math.floor(Date.now() / 1000) + 3600; // Default to 1 hour from now
-
+      const currentTimeSeconds = Math.floor(Date.now() / 1000);
+      
+      // CRITICAL FIX: Contract expects timelock OFFSET, not absolute timestamp
+      // The contract calculates: DstCancellation = block.timestamp + timelockOffset
+      const timelockOffset = Math.max(0, timelockInSeconds - currentTimeSeconds);
+      
       logger.debug('Timelock conversion', {
         nearTimelockNanoseconds: orderDetails.timelock,
         ethereumTimelockSeconds: timelockInSeconds,
-        currentTimeSeconds: Math.floor(Date.now() / 1000)
+        currentTimeSeconds: currentTimeSeconds,
+        timelockOffset: timelockOffset,
+        calculatedDstCancellation: currentTimeSeconds + timelockOffset
       });
 
       // Validate addresses before creating immutables
@@ -912,16 +919,47 @@ export class NearRelayer implements IMessageProcessor {
       }
 
       // Prepare escrow immutables matching IBaseEscrow.Immutables struct:
-      const immutables = {
-        orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
-        hashlock: event.secretHash,
-        maker: await this.ethereumContractService.getSignerAddress(), // Use relayer address as maker (liquidity provider)
-        taker: ethers.utils.getAddress(event.recipient),
-        token: ethers.constants.AddressZero, // ETH (destination token)
-        amount: ethAmountWei.toString(), // ETH amount user will receive
-        safetyDeposit: feeAmount.toString(), // Use auction fee as safety deposit
-        timelocks: timelockInSeconds
-      };
+    // CRITICAL: token must be passed as address string, not BigNumber
+    // CRITICAL: timelocks must be properly encoded Timelocks type, not raw uint256
+    
+    // Construct proper Timelocks value for DstCancellation stage
+    // CRITICAL: Contract expects RELATIVE offset, not absolute time
+    // TimelocksLib.get() adds deployment timestamp: (deployedAt + relativeOffset)
+    // So we pass the relative offset in seconds from deployment time
+    
+    // DstCancellation stage = 6, uses bits 192-223 (32 bits)
+    // We need to store the relative offset (timelockOffset) in the DstCancellation slot
+    const dstCancellationStage = 6; // TimelocksLib.Stage.DstCancellation
+    
+    // Ensure the offset fits in 32 bits (max ~136 years)
+    if (timelockOffset > 0xFFFFFFFF) {
+      throw new Error(`Timelock offset too large: ${timelockOffset} > ${0xFFFFFFFF}`);
+    }
+    
+    // Pack the relative offset into the DstCancellation stage slot
+    const timelocksBitPacked = ethers.BigNumber.from(timelockOffset).shl(dstCancellationStage * 32);
+    
+    // CRITICAL: Contract expects uint256 for Address and Timelocks custom types, not address strings
+    // Address type = uint256 (1inch AddressLib wraps addresses as uint256)
+    // Timelocks type = uint256 (TimelocksLib wraps timelocks as uint256)
+    
+    const makerAddress = await this.ethereumContractService.getSignerAddress();
+    const takerAddress = ethers.utils.getAddress(event.recipient);
+    
+    // CRITICAL: 1inch Address type expects uint256 representation of address
+    // Address is stored in lower 160 bits of uint256, upper bits can contain flags
+    // For basic addresses, we just need the address as uint256 (no flags)
+    
+    const immutables = {
+      orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
+      hashlock: event.secretHash,
+      maker: ethers.BigNumber.from(makerAddress).toString(), // Convert address to uint256 for Address custom type
+      taker: ethers.BigNumber.from(takerAddress).toString(), // Convert address to uint256 for Address custom type
+      token: ethers.BigNumber.from(ethers.constants.AddressZero).toString(), // Convert address to uint256 for Address custom type
+      amount: ethAmountWei.toString(), // ETH amount user will receive
+      safetyDeposit: feeAmount.toString(), // Use auction fee as safety deposit
+      timelocks: timelocksBitPacked.toString() // Properly encoded Timelocks value
+    };
 
       // Calculate total ETH value relayer must provide: safetyDeposit + ETH amount
     // CRITICAL: Use BigNumber arithmetic to match contract validation exactly
@@ -935,7 +973,11 @@ export class NearRelayer implements IMessageProcessor {
       token: immutables.token,
       amount: immutables.amount,
       safetyDeposit: immutables.safetyDeposit,
-      timelocks: immutables.timelocks
+      timelocks: immutables.timelocks,
+      timelocksRelativeOffset: timelockOffset,
+      timelocksBitPacked: timelocksBitPacked.toString(),
+      dstCancellationStage: dstCancellationStage,
+      timelocksHex: timelocksBitPacked.toHexString()
     });
     console.log('Cross-chain transfer calculation:');
     console.log('  NEAR Amount:', ethers.utils.formatUnits(nearAmount, 24), 'NEAR');
@@ -946,8 +988,22 @@ export class NearRelayer implements IMessageProcessor {
     console.log('Timelock conversion: NEAR nanoseconds', orderDetails.timelock, '-> Ethereum seconds', timelockInSeconds);
 
     // srcCancellationTimestamp must be > (block.timestamp + timelock_offset)
-  // Use NEAR timelock + buffer to ensure it's greater than DstCancellation
-  const srcCancellationTimestamp = timelockInSeconds + 3600; // Add 1 hour buffer
+    // CRITICAL: srcCancellationTimestamp must be > (block.timestamp + timelockOffset)
+    // Contract validation: if (DstCancellation > srcCancellationTimestamp) revert InvalidCreationTime()
+    // DstCancellation = block.timestamp + timelockOffset
+    // Add larger buffer to ensure srcCancellationTimestamp > DstCancellation
+    const srcCancellationTimestamp = Math.max(
+      timelockInSeconds,
+      currentTimeSeconds + timelockOffset + 3600  // Add 1 hour buffer to be safe
+    );
+    
+    logger.debug('Timelock validation calculation', {
+      currentTimeSeconds,
+      timelockOffset,
+      calculatedDstCancellation: currentTimeSeconds + timelockOffset,
+      srcCancellationTimestamp,
+      bufferSeconds: srcCancellationTimestamp - (currentTimeSeconds + timelockOffset)
+    });
   
   const result = await this.ethereumContractService.executeFactoryTransaction(
     'createDstEscrow',
