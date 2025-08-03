@@ -190,11 +190,15 @@ export class EthereumRelayer implements IMessageProcessor {
         blockNumber: event.blockNumber
       });
 
-      // Create NEAR swap order
-      await this.createNearSwapOrder(
+      // Create NEAR escrow for ETH→NEAR cross-chain transfer
+      // Generate consistent secret hash for cross-chain transfer
+      const secretHash = ethers.utils.keccak256('0x' + event.depositId);
+      
+      await this.createNearEscrowFromEthOrder(
         event.sender,
         event.nearRecipient,
         event.amount.toString(),
+        secretHash,
         event.depositId
       );
 
@@ -375,42 +379,66 @@ export class EthereumRelayer implements IMessageProcessor {
 
   // NEAR integration methods
 
-  private async createNearSwapOrder(
+  /**
+   * Create NEAR escrow for ETH→NEAR cross-chain transfer
+   * Relayer provides NEAR liquidity based on ETH amount and exchange rate
+   */
+  private async createNearEscrowFromEthOrder(
     ethereumSender: string,
     nearRecipient: string,
-    amount: string,
-    depositId: string
+    ethAmount: string,
+    secretHash: string,
+    orderId: string
   ): Promise<void> {
     try {
       this.validator.validateEthereumAddress(ethereumSender);
       this.validator.validateNearAccountId(nearRecipient);
-      this.validator.validateAmount(amount);
+      this.validator.validateAmount(ethAmount);
 
-      // Call NEAR contract to create swap order
+      // ETH→NEAR Cross-chain transfer: Relayer provides NEAR liquidity
+      // User locked ETH tokens, relayer provides equivalent NEAR
+      // Exchange rate: 1 ETH = 1000 NEAR (demo rate)
+      const ethAmountWei = ethers.BigNumber.from(ethAmount);
+      
+      // Convert ETH to NEAR using exchange rate
+      // 1 ETH = 10^18 wei, 1 NEAR = 10^24 yoctoNEAR
+      // Exchange rate: 1 ETH = 1000 NEAR, so 1 wei = 1000 yoctoNEAR * 10^6
+      const nearAmountYocto = ethAmountWei.mul(ethers.BigNumber.from('1000000000000')); // 1:1000 exchange rate
+      
+      logger.info('ETH→NEAR cross-chain transfer calculation', {
+        ethAmount: ethers.utils.formatEther(ethAmountWei),
+        nearAmount: ethers.utils.formatUnits(nearAmountYocto, 24),
+        exchangeRate: '1 ETH = 1000 NEAR'
+      });
+
+      // Call NEAR contract to create escrow with relayer's NEAR liquidity
       const result = await this.config.nearAccount.functionCall({
         contractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
         methodName: 'create_swap_order',
         args: {
           recipient: nearRecipient,
-          hashlock: ethers.utils.keccak256('0x' + depositId),
+          hashlock: secretHash, // Use consistent secret hash
           timelock_duration: 86400, // 24 hours
+          eth_sender: ethereumSender, // Track original ETH sender
+          order_id: orderId // Cross-reference with ETH order
         },
         gas: BigInt('30000000000000'), // 30 TGas
-        attachedDeposit: BigInt(amount)
+        attachedDeposit: nearAmountYocto.toBigInt() // Relayer provides NEAR liquidity
       });
 
-      logger.info('NEAR swap order created successfully', {
+      logger.info('NEAR escrow created successfully for ETH→NEAR transfer', {
         ethereumSender,
         nearRecipient,
-        amount,
-        depositId,
+        ethAmount: ethers.utils.formatEther(ethAmountWei),
+        nearAmount: ethers.utils.formatUnits(nearAmountYocto, 24),
+        orderId,
         result
       });
     } catch (error) {
       throw ErrorHandler.handleAndRethrow(
         error as Error,
-        'Failed to create NEAR swap order',
-        { ethereumSender, nearRecipient, amount, depositId }
+        'Failed to create NEAR escrow for ETH→NEAR transfer',
+        { ethereumSender, nearRecipient, ethAmount, orderId }
       );
     }
   }
@@ -443,19 +471,49 @@ export class EthereumRelayer implements IMessageProcessor {
     }
   }
 
+  /**
+   * Process Ethereum escrow creation for ETH→NEAR cross-chain transfer
+   * Relayer detects ETH escrow and creates corresponding NEAR escrow with liquidity
+   */
   private async processEscrowForNearSwap(event: EscrowCreatedEvent): Promise<void> {
     try {
-      // Process escrow creation for NEAR swap
-      // This is a placeholder for the actual implementation
-      logger.debug('Processing escrow for NEAR swap', {
+      logger.info('Processing ETH escrow for NEAR swap', {
         escrow: event.escrow,
+        initiator: event.initiator,
+        amount: ethers.utils.formatEther(event.amount),
+        targetChain: event.targetChain,
         targetAddress: event.targetAddress
+      });
+
+      // Validate this is a NEAR-targeted escrow
+      if (event.targetChain.toLowerCase() !== 'near') {
+        logger.debug('Skipping non-NEAR escrow', { targetChain: event.targetChain });
+        return;
+      }
+
+      // Generate consistent secret hash for cross-chain transfer
+      // Use escrow address as unique identifier for the transfer
+      const secretHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(event.escrow));
+      
+      // Create NEAR escrow with relayer's NEAR liquidity
+      await this.createNearEscrowFromEthOrder(
+        event.initiator, // ETH sender
+        event.targetAddress, // NEAR recipient
+        event.amount.toString(), // ETH amount locked
+        secretHash, // Consistent secret hash
+        event.escrow // Use escrow address as order ID
+      );
+
+      logger.info('ETH→NEAR cross-chain transfer processed successfully', {
+        ethEscrow: event.escrow,
+        ethAmount: ethers.utils.formatEther(event.amount),
+        nearRecipient: event.targetAddress
       });
     } catch (error) {
       throw ErrorHandler.handleAndRethrow(
         error as Error,
-        'Failed to process escrow for NEAR swap',
-        { escrow: event.escrow }
+        'Failed to process ETH escrow for NEAR swap',
+        { escrow: event.escrow, targetAddress: event.targetAddress }
       );
     }
   }

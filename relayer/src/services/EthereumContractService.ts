@@ -79,7 +79,8 @@ export class EthereumContractService implements IContractService {
    */
   async executeFactoryTransaction(
     method: string,
-    params: any[]
+    params: any[],
+    value?: ethers.BigNumber
   ): Promise<ethers.ContractTransaction> {
     try {
       if (!method || typeof method !== 'string') {
@@ -93,8 +94,18 @@ export class EthereumContractService implements IContractService {
       // Use factory contract with signer for write operations
       const factoryWithSigner = this.factoryContract.connect(this.signer);
       
+      // Prepare transaction options
+      const txOptions: any = {};
+      if (value && value.gt(0)) {
+        txOptions.value = value;
+        logger.info('Sending ETH value with transaction', {
+          method,
+          ethValue: ethers.utils.formatEther(value)
+        });
+      }
+      
       // Execute the transaction
-      const tx = await factoryWithSigner[method](...params);
+      const tx = await factoryWithSigner[method](...params, txOptions);
       
       logger.info('Factory transaction executed successfully', {
         factoryAddress: this.factoryContract.address,

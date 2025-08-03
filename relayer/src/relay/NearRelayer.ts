@@ -856,11 +856,15 @@ export class NearRelayer implements IMessageProcessor {
         );
       }
 
-      // Convert NEAR amount to Ethereum Wei (1:1 ratio for demo)
-      // NEAR has 24 decimals, ETH has 18 decimals
-      // For 1:1 conversion: divide by 10^3 to get correct Wei amount (empirically determined)
-      const nearAmount = ethers.BigNumber.from(event.amount);
-      const amountInWei = nearAmount.div(ethers.BigNumber.from('1000')); // Convert to correct Wei amount
+      // NEAR→ETH Cross-chain transfer: Relayer provides ETH liquidity
+      // User locked NEAR tokens, relayer provides equivalent ETH
+      // Exchange rate: 1 NEAR = 0.001 ETH (demo rate)
+      const nearAmount = ethers.BigNumber.from(event.amount); // NEAR amount in yoctoNEAR (24 decimals)
+      
+      // Convert NEAR to ETH using exchange rate
+      // 1 NEAR = 10^24 yoctoNEAR, 1 ETH = 10^18 wei
+      // Exchange rate: 1 NEAR = 0.001 ETH, so 1 yoctoNEAR = 0.001 wei / 10^6
+      const ethAmountWei = nearAmount.div(ethers.BigNumber.from('1000000')); // 1:0.001 exchange rate
 
       // Convert NEAR nanosecond timelock to Ethereum second timelock
       // NEAR uses nanoseconds, Ethereum uses seconds
@@ -879,20 +883,26 @@ export class NearRelayer implements IMessageProcessor {
         throw new Error(`Invalid recipient address: ${event.recipient}`);
       }
 
+      // Safety deposit for cross-chain transfer (covers gas + security)
+      // Using 50% of ETH amount that user will receive
+      const safetyDepositAmount = ethAmountWei.div(2); // 50% safety deposit
+      
       // Prepare escrow immutables matching IBaseEscrow.Immutables struct:
-      // CRITICAL: All address fields must be valid Ethereum addresses, not NEAR account IDs
       const immutables = {
         orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
         hashlock: event.secretHash,
-        maker: ethers.constants.AddressZero, // Always use zero address for NEAR-originated orders
-        taker: ethers.utils.getAddress(event.recipient), // Validate Ethereum address
-        token: ethers.constants.AddressZero, // ETH = zero address
-        amount: amountInWei.toString(),
-        safetyDeposit: 0,
+        maker: ethers.constants.AddressZero, // zero address for NEAR-originated orders
+        taker: ethers.utils.getAddress(event.recipient),
+        token: ethers.constants.AddressZero, // ETH (destination token)
+        amount: ethAmountWei.toString(), // ETH amount user will receive
+        safetyDeposit: safetyDepositAmount.toString(),
         timelocks: timelockInSeconds
       };
 
-      logger.debug('Prepared escrow immutables (object format)', {
+      // Calculate total ETH value relayer must provide: safetyDeposit + ETH amount
+      const totalEthValue = ethAmountWei.add(safetyDepositAmount);
+      
+      console.log('Creating Ethereum escrow with immutables:', {
         orderHash: immutables.orderHash,
         hashlock: immutables.hashlock,
         maker: immutables.maker,
@@ -902,15 +912,20 @@ export class NearRelayer implements IMessageProcessor {
         safetyDeposit: immutables.safetyDeposit,
         timelocks: immutables.timelocks
       });
+      console.log('Cross-chain transfer calculation:');
+      console.log('  NEAR Amount:', ethers.utils.formatUnits(nearAmount, 24), 'NEAR');
+      console.log('  ETH Amount (exchange rate):', ethers.utils.formatEther(ethAmountWei), 'ETH');
+      console.log('  Safety Deposit:', ethers.utils.formatEther(safetyDepositAmount), 'ETH');
+      console.log('  Total ETH Provided by Relayer:', ethers.utils.formatEther(totalEthValue), 'ETH');
+      console.log('Timelock conversion: NEAR nanoseconds', orderDetails.timelock, '-> Ethereum seconds', timelockInSeconds);
 
-      // Create Ethereum escrow using factory contract
-      const tx = await this.ethereumContractService.executeFactoryTransaction(
+      const result = await this.ethereumContractService.executeFactoryTransaction(
         'createDstEscrow',
-        [immutables, 0] // 0 for srcCancellationTimestamp
+        [immutables, Math.floor(Date.now() / 1000)],
+        totalEthValue // Send ETH value = safetyDeposit + amount
       );
 
-      const receipt = await tx.wait();
-      
+      const receipt = await result.wait();
       // Extract escrow address from event logs
       let escrowAddress = '';
       for (const log of receipt.logs) {
@@ -930,7 +945,8 @@ export class NearRelayer implements IMessageProcessor {
         orderId: event.orderId,
         escrowAddress,
         recipient: event.recipient,
-        amount: amountInWei.toString(),
+        nearAmount: nearAmount.toString(),
+        ethAmount: ethAmountWei.toString(),
         secretHash: event.secretHash
       });
 
