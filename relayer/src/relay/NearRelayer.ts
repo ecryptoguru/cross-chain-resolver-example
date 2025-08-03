@@ -936,8 +936,9 @@ export class NearRelayer implements IMessageProcessor {
       throw new Error(`Timelock offset too large: ${timelockOffset} > ${0xFFFFFFFF}`);
     }
     
-    // Pack the relative offset into the DstCancellation stage slot
-    const timelocksBitPacked = ethers.BigNumber.from(timelockOffset).shl(dstCancellationStage * 32);
+    // Pack the relative offset into the DstCancellation stage slot (bits 192-223)
+    // FIXED: Use proper bit positioning for DstCancellation stage
+    const timelocksBitPacked = ethers.BigNumber.from(timelockOffset).shl(192);
     
     // CRITICAL: Contract expects uint256 for Address and Timelocks custom types, not address strings
     // Address type = uint256 (1inch AddressLib wraps addresses as uint256)
@@ -991,11 +992,11 @@ export class NearRelayer implements IMessageProcessor {
     // CRITICAL: srcCancellationTimestamp must be > (block.timestamp + timelockOffset)
     // Contract validation: if (DstCancellation > srcCancellationTimestamp) revert InvalidCreationTime()
     // DstCancellation = block.timestamp + timelockOffset
-    // Add larger buffer to ensure srcCancellationTimestamp > DstCancellation
-    const srcCancellationTimestamp = Math.max(
-      timelockInSeconds,
-      currentTimeSeconds + timelockOffset + 3600  // Add 1 hour buffer to be safe
-    );
+    // FIXED: Use much larger buffer to ensure contract validation always passes
+    // Contract validation: DstCancellation = block.timestamp + timelockOffset
+    // We need srcCancellationTimestamp > (block.timestamp + timelockOffset)
+    // Use original NEAR timelock + very large buffer to guarantee success
+    const srcCancellationTimestamp = timelockInSeconds + 86400; // Add 24 hour buffer to guarantee validation passes
     
     logger.debug('Timelock validation calculation', {
       currentTimeSeconds,

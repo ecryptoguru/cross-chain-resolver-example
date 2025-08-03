@@ -170,9 +170,9 @@ export class DynamicAuctionService {
       return fromAmount.mul(rateMultiplier).div(1_000_000_000_000); // Adjust for decimal difference
     } else {
       // ETH (18 decimals) → NEAR (24 decimals)  
-      // Apply rate and adjust decimals
+      // Apply rate and adjust decimals: ETH * rate * 10^6 / 10^6 = ETH * rate
       const rateMultiplier = ethers.BigNumber.from(Math.floor(rate * 1_000_000));
-      return fromAmount.mul(rateMultiplier).mul(1_000_000); // Adjust for decimal difference
+      return fromAmount.mul(rateMultiplier).div(1_000_000).mul(1_000_000); // Apply rate, then adjust decimals
     }
   }
 

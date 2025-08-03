@@ -196,7 +196,7 @@ export class EthereumRelayer implements IMessageProcessor {
 
       // Create NEAR escrow for ETH→NEAR cross-chain transfer
       // Generate consistent secret hash for cross-chain transfer
-      const secretHash = ethers.utils.keccak256('0x' + event.depositId);
+      const secretHash = ethers.utils.keccak256(event.depositId);
       
       await this.createNearEscrowFromEthOrder(
         event.sender,
