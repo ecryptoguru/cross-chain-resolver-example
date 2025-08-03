@@ -539,8 +539,8 @@ class ModernNearToEthTransferTester {
       });
       
       // Wait for relayer to have time to process recent blocks
-      // The relayer polls every 3 seconds, so we wait longer to ensure it catches up
-      const relayerProcessingTime = 1000; // 1 seconds
+      // The relayer now polls every 15 seconds, so we wait longer to ensure it catches up
+      const relayerProcessingTime = 30000; // 30 seconds (optimized for reduced RPC calls)
       
       this.logger.info('Waiting for relayer to process transaction block', {
         orderId,
@@ -557,9 +557,9 @@ class ModernNearToEthTransferTester {
         const bridgeABI = this.getBridgeABI();
         const bridgeContract = new ethers.Contract(this.config.nearBridgeAddress, bridgeABI, provider);
         
-        // Check for recent deposit events in the last 20 blocks
+        // Check for recent deposit events in the last 10 blocks (optimized for fewer RPC calls)
         const currentEthBlock = await provider.getBlockNumber();
-        const fromBlock = Math.max(0, currentEthBlock - 20);
+        const fromBlock = Math.max(0, currentEthBlock - 10);
         
         const filter = bridgeContract.filters.DepositInitiated();
         const events = await bridgeContract.queryFilter(filter, fromBlock);
@@ -694,7 +694,7 @@ async function main(): Promise<void> {
       nearPrivateKey: process.env.NEAR_PRIVATE_KEY!,
       nearEscrowContractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
       ethRecipient: process.env.ETH_RECIPIENT!,
-      transferAmount: process.env.TRANSFER_AMOUNT!,
+      transferAmount: process.env.NEAR_TRANSFER_AMOUNT!,
       timelock: parseInt(process.env.TIMELOCK_DURATION!) || 3600,
       logLevel: process.env.LOG_LEVEL || 'info'
     };

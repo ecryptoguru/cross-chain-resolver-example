@@ -62,6 +62,24 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Represents a single fill event for partial order fulfillment
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(crate = "near_sdk::serde")]
+pub struct FillEvent {
+    /// Unique identifier for this fill
+    pub fill_id: String,
+    /// Amount filled in this event
+    pub filled_amount: u128,
+    /// Timestamp when this fill occurred
+    pub timestamp: u64,
+    /// Transaction hash or identifier for this fill
+    pub tx_hash: Option<String>,
+    /// Solver or relayer that executed this fill
+    pub executor: String,
+    /// Additional metadata for this fill
+    pub metadata: Option<HashMap<String, String>>,
+}
+
 /// Represents the status of a cross-chain swap order
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(crate = "near_sdk::serde")]
@@ -70,7 +88,9 @@ pub enum OrderStatus {
     Created,
     /// Order is being processed by the solver
     Processing,
-    /// Order has been successfully filled
+    /// Order has been partially filled
+    PartiallyFilled,
+    /// Order has been successfully filled completely
     Filled,
     /// Order has been cancelled
     Cancelled,
@@ -85,6 +105,7 @@ impl fmt::Display for OrderStatus {
         match self {
             Self::Created => write!(f, "created"),
             Self::Processing => write!(f, "processing"),
+            Self::PartiallyFilled => write!(f, "partially_filled"),
             Self::Filled => write!(f, "filled"),
             Self::Cancelled => write!(f, "cancelled"),
             Self::Expired => write!(f, "expired"),
@@ -142,6 +163,27 @@ pub struct CrossChainOrder {
     pub metadata: Option<HashMap<String, String>>,
     /// When the order was last updated (UNIX timestamp in seconds)
     pub updated_at: u64,
+    
+    // ========== Partial Fill Support Fields ==========
+    /// Total amount that has been filled so far
+    pub filled_amount: u128,
+    /// Remaining amount to be filled
+    pub remaining_amount: u128,
+    /// History of all fill events for this order
+    pub fill_history: Vec<FillEvent>,
+    /// Parent order ID if this is a split order
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_order_id: Option<String>,
+    /// Child order IDs if this order has been split
+    pub child_order_ids: Vec<String>,
+    /// Minimum fill amount (orders below this won't be processed)
+    pub min_fill_amount: u128,
+    /// Maximum number of fills allowed for this order
+    pub max_fills: u32,
+    /// Current number of fills executed
+    pub fill_count: u32,
+    /// Whether this order allows partial fills
+    pub allow_partial_fills: bool,
 }
 
 impl CrossChainOrder {
@@ -239,7 +281,7 @@ impl CrossChainOrder {
         hashlock: String,
         timelock: u64,
     ) -> Result<Self, ValidationError> {
-        // Validate parameters first
+        // Validate all parameters
         Self::validate_params(
             &id,
             &source_chain,
@@ -254,21 +296,22 @@ impl CrossChainOrder {
             timelock,
         )?;
 
-        let now = env::block_timestamp() / 1_000_000; // Convert to seconds
-        
+        let now = Self::current_timestamp();
+        let creator = env::signer_account_id();
+
         Ok(Self {
             id,
             source_chain,
             dest_chain,
             source_token,
             dest_token,
-            amount: source_amount, // Use source_amount as the primary amount
+            amount: source_amount, // For compatibility
             source_amount,
             dest_amount,
             source_address,
-            dest_address: dest_address.clone(),
-            min_amount_out: dest_amount, // Default to dest_amount if not specified
-            creator: env::predecessor_account_id(),
+            dest_address,
+            min_amount_out: dest_amount, // Default to exact amount
+            creator,
             recipient: dest_address.clone(),
             status: OrderStatus::Created,
             created_at: now,
@@ -278,6 +321,16 @@ impl CrossChainOrder {
             tee_attestation_id: None,
             metadata: None,
             updated_at: now,
+            // Initialize partial fill fields
+            filled_amount: 0,
+            remaining_amount: source_amount,
+            fill_history: Vec::new(),
+            parent_order_id: None,
+            child_order_ids: Vec::new(),
+            min_fill_amount: source_amount / 100, // Default to 1% minimum
+            max_fills: 10, // Default maximum fills
+            fill_count: 0,
+            allow_partial_fills: true, // Default to allowing partial fills
         })
     }
 
@@ -338,9 +391,192 @@ impl CrossChainOrder {
         if self.metadata.is_none() {
             self.metadata = Some(HashMap::new());
         }
-        if let Some(metadata) = &mut self.metadata {
+        if let Some(ref mut metadata) = self.metadata {
             metadata.insert(key, value);
         }
+        self.updated_at = Self::current_timestamp();
+    }
+
+    // ========== Partial Fill Methods ==========
+    
+    /// Process a partial fill for this order
+    pub fn process_partial_fill(
+        &mut self, 
+        fill_amount: u128, 
+        executor: String,
+        tx_hash: Option<String>
+    ) -> Result<FillEvent, ValidationError> {
+        // Validate partial fill is allowed
+        if !self.allow_partial_fills {
+            return Err(ValidationError::Other("Partial fills not allowed for this order".to_string()));
+        }
+        
+        // Check if order can accept more fills
+        if self.fill_count >= self.max_fills {
+            return Err(ValidationError::Other("Maximum fills reached".to_string()));
+        }
+        
+        // Validate fill amount
+        if fill_amount == 0 {
+            return Err(ValidationError::InvalidAmount);
+        }
+        
+        if fill_amount < self.min_fill_amount {
+            return Err(ValidationError::Other("Fill amount below minimum".to_string()));
+        }
+        
+        if fill_amount > self.remaining_amount {
+            return Err(ValidationError::Other("Fill amount exceeds remaining amount".to_string()));
+        }
+        
+        // Check if order is in valid state for filling
+        if !matches!(self.status, OrderStatus::Created | OrderStatus::Processing | OrderStatus::PartiallyFilled) {
+            return Err(ValidationError::InvalidOrderState);
+        }
+        
+        // Create fill event
+        let fill_id = format!("{}-fill-{}", self.id, self.fill_count + 1);
+        let fill_event = FillEvent {
+            fill_id: fill_id.clone(),
+            filled_amount: fill_amount,
+            timestamp: Self::current_timestamp(),
+            tx_hash,
+            executor,
+            metadata: None,
+        };
+        
+        // Update order state
+        self.filled_amount += fill_amount;
+        self.remaining_amount -= fill_amount;
+        self.fill_count += 1;
+        self.fill_history.push(fill_event.clone());
+        self.updated_at = Self::current_timestamp();
+        
+        // Update order status based on remaining amount
+        if self.remaining_amount == 0 {
+            self.update_status(OrderStatus::Filled);
+        } else {
+            self.update_status(OrderStatus::PartiallyFilled);
+        }
+        
+        log!("Processed partial fill: {} amount {} for order {}", 
+             fill_id, fill_amount, self.id);
+        
+        Ok(fill_event)
+    }
+    
+    /// Split this order into smaller orders
+    pub fn split_order(&self, split_amounts: Vec<u128>) -> Result<Vec<CrossChainOrder>, ValidationError> {
+        // Validate split is allowed
+        if !self.allow_partial_fills {
+            return Err(ValidationError::Other("Order splitting not allowed".to_string()));
+        }
+        
+        // Validate order state
+        if !matches!(self.status, OrderStatus::Created) {
+            return Err(ValidationError::InvalidOrderState);
+        }
+        
+        // Validate split amounts
+        let total_split: u128 = split_amounts.iter().sum();
+        if total_split != self.remaining_amount {
+            return Err(ValidationError::Other("Split amounts don't match remaining amount".to_string()));
+        }
+        
+        // Check minimum amounts
+        for &amount in &split_amounts {
+            if amount < self.min_fill_amount {
+                return Err(ValidationError::Other("Split amount below minimum".to_string()));
+            }
+        }
+        
+        let mut child_orders = Vec::new();
+        
+        for (i, &split_amount) in split_amounts.iter().enumerate() {
+            let child_id = format!("{}-split-{}", self.id, i + 1);
+            
+            // Calculate proportional dest_amount
+            let proportional_dest_amount = (self.dest_amount * split_amount) / self.source_amount;
+            
+            let child_order = CrossChainOrder {
+                id: child_id,
+                source_chain: self.source_chain.clone(),
+                dest_chain: self.dest_chain.clone(),
+                source_token: self.source_token.clone(),
+                dest_token: self.dest_token.clone(),
+                amount: split_amount,
+                source_amount: split_amount,
+                dest_amount: proportional_dest_amount,
+                source_address: self.source_address.clone(),
+                dest_address: self.dest_address.clone(),
+                min_amount_out: (self.min_amount_out * split_amount) / self.source_amount,
+                creator: self.creator.clone(),
+                recipient: self.recipient.clone(),
+                status: OrderStatus::Created,
+                created_at: Self::current_timestamp(),
+                expires_at: self.expires_at,
+                timelock: self.timelock,
+                hashlock: self.hashlock.clone(),
+                tee_attestation_id: self.tee_attestation_id.clone(),
+                metadata: self.metadata.clone(),
+                updated_at: Self::current_timestamp(),
+                // Partial fill fields for child order
+                filled_amount: 0,
+                remaining_amount: split_amount,
+                fill_history: Vec::new(),
+                parent_order_id: Some(self.id.clone()),
+                child_order_ids: Vec::new(),
+                min_fill_amount: self.min_fill_amount,
+                max_fills: self.max_fills,
+                fill_count: 0,
+                allow_partial_fills: self.allow_partial_fills,
+            };
+            
+            child_orders.push(child_order);
+        }
+        
+        log!("Split order {} into {} child orders", self.id, child_orders.len());
+        
+        Ok(child_orders)
+    }
+    
+    /// Check if order needs refund for unfilled portion
+    pub fn needs_refund(&self) -> bool {
+        let current_time = Self::current_timestamp();
+        
+        // Order needs refund if it's expired and has unfilled amount
+        (current_time > self.expires_at || current_time > self.timelock) &&
+        self.remaining_amount > 0 &&
+        matches!(self.status, OrderStatus::PartiallyFilled | OrderStatus::Created | OrderStatus::Processing)
+    }
+    
+    /// Calculate refund amount for unfilled portion
+    pub fn calculate_refund_amount(&self) -> u128 {
+        if self.needs_refund() {
+            self.remaining_amount
+        } else {
+            0
+        }
+    }
+    
+    /// Get fill progress as percentage (0-100)
+    pub fn get_fill_percentage(&self) -> u8 {
+        if self.source_amount == 0 {
+            return 0;
+        }
+        
+        let percentage = (self.filled_amount * 100) / self.source_amount;
+        std::cmp::min(percentage as u8, 100)
+    }
+    
+    /// Check if order is completely filled
+    pub fn is_completely_filled(&self) -> bool {
+        self.remaining_amount == 0 && self.status == OrderStatus::Filled
+    }
+    
+    /// Check if order is partially filled
+    pub fn is_partially_filled(&self) -> bool {
+        self.filled_amount > 0 && self.remaining_amount > 0 && self.status == OrderStatus::PartiallyFilled
     }
 }
 
@@ -441,6 +677,16 @@ mod tests {
             tee_attestation_id: None,
             metadata: None,
             updated_at: now,
+            // Initialize partial fill fields for test
+            filled_amount: 0,
+            remaining_amount: 1000000000000000000,
+            fill_history: Vec::new(),
+            parent_order_id: None,
+            child_order_ids: Vec::new(),
+            min_fill_amount: 10000000000000000, // 1% minimum
+            max_fills: 10,
+            fill_count: 0,
+            allow_partial_fills: true,
         }
     }
 

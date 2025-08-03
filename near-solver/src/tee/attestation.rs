@@ -6,87 +6,28 @@
 
 use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
-    env, near_bindgen, AccountId,
-    collections::{LookupMap, UnorderedSet},
-    serde::{Deserialize, Serialize},
-    BorshStorageKey,
+    env, require, AccountId, BorshStorageKey, PanicOnDefault, Promise,
 };
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::hash::Hash;
 
-/// Represents different types of TEE environments
-#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq, Hash)]
-#[serde(crate = "near_sdk::serde")]
-pub enum TeeType {
-    /// Intel Software Guard Extensions (SGX)
-    Sgx,
-    /// AMD Secure Encrypted Virtualization (SEV)
-    Sev,
-    /// ARM TrustZone
-    TrustZone,
-    /// Google Asylo
-    Asylo,
-    /// Microsoft Azure Attestation
-    AzureAttestation,
-    /// AWS Nitro Enclaves
-    AwsNitro,
-    /// Other TEE type (for future compatibility)
-    Other(String),
-}
+use crate::{
+    tee::{
+        errors::TeeAttestationError,
+        events::TeeAttestationEvent,
+        storage::StorageKey,
+        types::{TeeType, Timestamp},
+    },
+    utils::{
+        account_validation::validate_account_id,
+        errors::ValidationError,
+    },
+};
 
-impl TeeType {
-    /// Returns the string representation of the TEE type
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Sgx => "sgx",
-            Self::Sev => "sev",
-            Self::TrustZone => "trustzone",
-            Self::Asylo => "asylo",
-            Self::AzureAttestation => "azure_attestation",
-            Self::AwsNitro => "aws_nitro",
-            Self::Other(s) => s.as_str(),
-        }
-    }
-    
-    /// Returns true if this TEE type is considered production-ready
-    pub fn is_production_ready(&self) -> bool {
-        matches!(self, Self::Sgx | Self::Sev | Self::TrustZone)
-    }
-    
-    /// Returns true if this TEE type is cloud-based
-    pub fn is_cloud_based(&self) -> bool {
-        matches!(self, Self::AzureAttestation | Self::AwsNitro)
-    }
-}
-
-impl fmt::Display for TeeType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Other(s) => write!(f, "other:{}", s),
-            _ => write!(f, "{}", self.as_str()),
-        }
-    }
-}
-
-impl FromStr for TeeType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "sgx" => Ok(Self::Sgx),
-            "sev" => Ok(Self::Sev),
-            "trustzone" | "trust_zone" => Ok(Self::TrustZone),
-            "asylo" => Ok(Self::Asylo),
-            "azure_attestation" | "azure" => Ok(Self::AzureAttestation),
-            "aws_nitro" | "nitro" => Ok(Self::AwsNitro),
-            _ if s.starts_with("other:") => Ok(Self::Other(s[6..].to_string())),
-            _ => Err(format!("Invalid TEE type: {}", s)),
-        }
-    }
-}
+// Using the canonical TeeType implementation from types.rs
 
 /// Key for storing TEE attestations in the registry
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -494,221 +435,8 @@ pub struct TeeAttestation {
     pub is_active: bool,
 }
 
-/// Possible errors during TEE attestation verification
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "near_sdk::serde")]
-pub enum TeeAttestationError {
-    /// The registry is already paused
-    AlreadyPaused,
-    
-    /// The registry is not paused
-    NotPaused,
-    
-    /// The registry is paused
-    Paused,
-    /// The attestation has expired
-    Expired { 
-        /// Current timestamp when the error occurred
-        current: u64, 
-        /// When the attestation expired
-        expires_at: u64 
-    },
-    
-    /// The TEE type is not supported
-    UnsupportedTeeType {
-        /// The unsupported TEE type
-        tee_type: String,
-    },
-    
-    /// The metadata is invalid
-    InvalidMetadata {
-        /// Field that failed validation
-        field: String,
-        /// Expected value format
-        expected: String,
-        /// Actual value that caused the error
-        actual: String,
-    },
-    
-    /// The attestation has expired
-    AttestationExpired {
-        /// When the attestation expired
-        expires_at: u64,
-        /// Current timestamp when checked
-        current_timestamp: u64,
-    },
-    
-    /// The attestation is not yet valid
-    NotYetValid { 
-        /// Current timestamp when the error occurred
-        current: u64, 
-        /// When the attestation becomes valid
-        valid_from: u64 
-    },
-    
-    /// The signature is invalid
-    InvalidSignature { 
-        /// Details about the signature validation failure
-        details: String 
-    },
-    
-    /// The report is invalid
-    InvalidReport { 
-        /// Details about the report validation failure
-        details: String 
-    },
-    
-    /// The public key is invalid
-    InvalidPublicKey { 
-        /// Details about the public key validation failure
-        details: String 
-    },
-    
-    /// The TEE type is not supported
-    UnsupportedTeeType { 
-        /// The unsupported TEE type
-        tee_type: String 
-    },
-    
-    /// The TEE type is not recommended for production use
-    NonProductionTee { 
-        /// The non-production TEE type
-        tee_type: String 
-    },
-    
-    /// The registry is paused
-    RegistryPaused,
-    
-    /// The contract is paused
-    ContractPaused,
-    
-    /// The caller is not authorized
-    Unauthorized { 
-        /// The account that attempted the unauthorized action
-        #[schemars(with = "String")]
-        caller: AccountId, 
-        /// The required permission/role
-        required: String 
-    },
-    
-    /// The attestation was not found
-    NotFound { 
-        /// The public key of the missing attestation
-        public_key: String 
-    },
-    
-    /// The configuration is invalid
-    InvalidConfig { 
-        /// Details about the configuration issue
-        details: String 
-    },
-    
-    /// The attestation has been revoked
-    Revoked { 
-        /// The public key of the revoked attestation
-        public_key: String, 
-        /// When the attestation was revoked
-        at: u64 
-    },
-    
-    /// The attestation already exists
-    AlreadyExists { 
-        /// The public key of the existing attestation
-        public_key: String 
-    },
-    
-    /// The attestation was already revoked
-    AlreadyRevoked { 
-        /// The public key of the already revoked attestation
-        public_key: String 
-    },
-    
-    /// Arithmetic overflow occurred
-    ArithmeticOverflow,
-    
-    /// The expiration time is invalid
-    InvalidExpiration { 
-        /// Current timestamp
-        current: u64, 
-        /// New expiration timestamp that's invalid
-        new: u64 
-    },
-    
-    /// Other error
-    Other { 
-        /// Details about the error
-        details: String 
-    },
-}
-
-impl fmt::Display for TeeAttestationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Expired { current, expires_at } => 
-                write!(f, "TEE attestation has expired at {}: current timestamp is {}", expires_at, current),
-                
-            Self::NotYetValid { current, valid_from } => 
-                write!(f, "TEE attestation is not yet valid: current timestamp is {}, but it becomes valid at {}", current, valid_from),
-                
-            Self::InvalidSignature { details } => 
-                write!(f, "Invalid TEE attestation signature: {}", details),
-                
-            Self::InvalidReport { details } => 
-                write!(f, "Invalid TEE attestation report: {}", details),
-                
-            Self::InvalidPublicKey { details } => 
-                write!(f, "Invalid TEE public key: {}", details),
-                
-            Self::UnsupportedTeeType { tee_type } => 
-                write!(f, "Unsupported TEE type: {}", tee_type),
-                
-            Self::NonProductionTee { tee_type } => 
-                write!(f, "Non-production TEE type: {}", tee_type),
-                
-            Self::RegistryPaused => 
-                write!(f, "TEE attestation registry is paused"),
-                
-            Self::ContractPaused => 
-                write!(f, "TEE attestation contract is paused"),
-                
-            Self::Unauthorized { caller, required } => 
-                write!(f, "Unauthorized TEE attestation action by {}: requires {}", caller, required),
-                
-            Self::NotFound { public_key } => 
-                write!(f, "TEE attestation not found for public key: {}", public_key),
-                
-            Self::InvalidConfig { details } => 
-                write!(f, "Invalid TEE attestation configuration: {}", details),
-                
-            Self::Revoked { public_key, at } => 
-                write!(f, "TEE attestation has been revoked for public key {} at {}", public_key, at),
-                
-            Self::AlreadyExists { public_key } =>
-                write!(f, "TEE attestation already exists for public key: {}", public_key),
-                
-            Self::AlreadyRevoked { public_key } =>
-                write!(f, "TEE attestation was already revoked for public key: {}", public_key),
-                
-            Self::ArithmeticOverflow =>
-                write!(f, "Arithmetic overflow occurred while processing TEE attestation"),
-                
-            Self::InvalidExpiration { current, new } =>
-                write!(f, "Invalid expiration time: new expiration {} is not after current time {}", new, current),
-                
-            Self::Other { details } => 
-                write!(f, "TEE attestation error: {}", details),
-                
-            Self::AlreadyPaused => 
-                write!(f, "TEE attestation registry is already paused"),
-                
-            Self::NotPaused => 
-                write!(f, "TEE attestation registry is not paused"),
-                
-            Self::Paused => 
-                write!(f, "TEE attestation registry is paused"),
-        }
-    }
-}
+// Using the canonical TeeType from the types module
+use crate::tee::types::TeeType;
 
 impl TeeAttestation {
     /// Creates a new TEE attestation with comprehensive validation
@@ -959,6 +687,7 @@ impl TeeAttestation {
         // For real verification, we need a valid public key and signature
         if self.public_key.is_empty() || self.signature.is_empty() {
             return Err(TeeAttestationError::InvalidSignature {
+                public_key: self.public_key.clone(),
                 details: "Public key or signature is empty".to_string(),
             });
         }
@@ -966,9 +695,10 @@ impl TeeAttestation {
         // Try to decode the public key (expected in SEC1 format: 0x04 || x || y)
         let public_key_bytes = match hex::decode(&self.public_key) {
             Ok(bytes) => bytes,
-            Err(_) => {
+            Err(e) => {
                 return Err(TeeAttestationError::InvalidSignature {
-                    details: "Failed to decode public key from hex".to_string(),
+                    public_key: self.public_key.clone(),
+                    details: format!("Failed to decode public key from hex: {}", e),
                 });
             }
         };
@@ -978,6 +708,7 @@ impl TeeAttestation {
             Ok(key) => key,
             Err(e) => {
                 return Err(TeeAttestationError::InvalidSignature {
+                    public_key: self.public_key.clone(),
                     details: format!("Failed to parse public key: {}", e),
                 });
             }
@@ -986,9 +717,10 @@ impl TeeAttestation {
         // Decode the signature (expected in ASN.1 DER format)
         let signature_bytes = match base64::decode(&self.signature) {
             Ok(bytes) => bytes,
-            Err(_) => {
+            Err(e) => {
                 return Err(TeeAttestationError::InvalidSignature {
-                    details: "Failed to decode signature from base64".to_string(),
+                    public_key: self.public_key.clone(),
+                    details: format!("Failed to decode signature: {}", e),
                 });
             }
         };
@@ -996,13 +728,14 @@ impl TeeAttestation {
         // Parse the signature
         let signature = match Signature::from_der(&signature_bytes) {
             Ok(sig) => sig,
-            Err(_) => {
+            Err(e) => {
                 // Try compact format if ASN.1 parsing fails
                 if let Ok(sig) = Signature::from_slice(&signature_bytes) {
                     sig
                 } else {
                     return Err(TeeAttestationError::InvalidSignature {
-                        details: "Failed to parse signature".to_string(),
+                        public_key: self.public_key.clone(),
+                        details: format!("Failed to verify signature: {}", e),
                     });
                 }
             }
@@ -1088,8 +821,8 @@ impl TeeAttestation {
             
         if new_expires_at <= current_timestamp {
             return Err(TeeAttestationError::InvalidExpiration { 
-                current: current_timestamp, 
-                new: new_expires_at 
+                expires_at: new_expires_at,
+                current_time: current_timestamp
             });
         }
         
@@ -1160,13 +893,20 @@ mod tests {
     fn create_test_attestation(metadata_override: Option<HashMap<String, String>>) -> TeeAttestation {
         // Start with default test metadata
         let mut metadata = HashMap::new();
-        metadata.insert("test_key".to_string(), "test_value".to_string());
         
-        // Add required SGX metadata fields
-        metadata.insert("sgx_mr_enclave".to_string(), "test_mr_enclave".to_string());
-        metadata.insert("sgx_mr_signer".to_string(), "test_mr_signer".to_string());
+        // Add comprehensive SGX metadata with realistic test values
+        metadata.insert("sgx_mr_enclave".to_string(), "a1b2c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123".to_string());
+        metadata.insert("sgx_mr_signer".to_string(), "a1b2c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123".to_string());
         metadata.insert("sgx_isv_prod_id".to_string(), "1".to_string());
         metadata.insert("sgx_isv_svn".to_string(), "1".to_string());
+        metadata.insert("sgx_attributes".to_string(), "0000000000000000".to_string());
+        metadata.insert("sgx_misc_select".to_string(), "00000000".to_string());
+        metadata.insert("sgx_config_id".to_string(), "0000000000000000000000000000000000000000000000000000000000000000".to_string());
+        metadata.insert("sgx_config_svn".to_string(), "0000".to_string());
+        metadata.insert("sgx_isv_extended_product_id".to_string(), "00000000000000000000000000000000".to_string());
+        
+        // Add test-specific metadata
+        metadata.insert("test_key".to_string(), "test_value".to_string());
         
         // Apply any overrides from the caller
         if let Some(overrides) = metadata_override {
@@ -1180,12 +920,18 @@ mod tests {
         // In a real implementation, this would be a properly signed attestation report
         let test_signature = "SGX_VERIFICATION_TEST_MODE_SIGNATURE".to_string();
         
+        // Create a test report with a valid format
+        let test_report = r#"{
+            "isvEnclaveQuoteStatus": "OK",
+            "isvEnclaveQuoteBody": "AgAAAM0DAAALAAoAAAAAAM2y7Q1e6kY5M2bZ4KJYlQYAAABMQYACgQAAAAAAACqBgQAAgAqAFNJR05BVFVSRS1URVNUX09OTFkK"
+        }"#.to_string();
+        
         // expires_in_seconds is the only duration parameter needed
         // The current timestamp is added internally in the new() method
         TeeAttestation::new(
             TeeType::Sgx,
-            "test_public_key".to_string(),
-            "test_report".to_string(),
+            "048b8651e0c3d0d1f7e4c7d9b5b3a2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3".to_string(),
+            test_report,
             test_signature,
             24 * 60 * 60, // 24 hours in seconds
             "test.near".parse().unwrap(),

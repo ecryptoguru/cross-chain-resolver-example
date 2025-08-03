@@ -7,7 +7,8 @@ use p256::ecdsa::{SigningKey, Signature, signature::Signer};
 use rand_core::OsRng;
 use near_solver::{
     tee::{
-        attestation::{TeeAttestation, TeeAttestationError, TeeType as AttestationTeeType},
+        attestation::{TeeAttestation, TeeType as AttestationTeeType},
+        errors::TeeAttestationError,
         TeeType,
         registry::TeeAttestationRegistry,
     },
@@ -69,7 +70,7 @@ mod test_utils {
         signature: String,
         signer_id: AccountId,
         ttl_seconds: u64,
-    ) -> TeeAttestation {
+    ) -> Result<TeeAttestation, TeeAttestationError> {
         create_test_attestation_with_metadata(
             tee_type,
             public_key,
@@ -82,7 +83,7 @@ mod test_utils {
     }
 
     /// Helper function to create a test attestation with custom metadata
-    pub fn create_test_attestation(
+    pub fn create_test_attestation_with_metadata(
         tee_type: TeeType,
         public_key: String,
         report: String,
@@ -90,30 +91,36 @@ mod test_utils {
         signer_id: AccountId,
         ttl_seconds: u64,
         metadata: Option<HashMap<String, String>>,
-    ) -> Result<AttestationImpl, TeeAttestationError> {
+    ) -> Result<TeeAttestation, TeeAttestationError> {
         // Convert between TeeType variants if needed
         let tee_type = to_attestation_tee_type(tee_type);
         
-        // Use provided metadata or create default SGX metadata
-        let metadata = metadata.unwrap_or_else(|| {
-            let mut m = HashMap::new();
-            m.insert("sgx_mr_enclave".to_string(), "test_mr_enclave".to_string());
-            m.insert("sgx_mr_signer".to_string(), "test_mr_signer".to_string());
-            m.insert("sgx_isv_prod_id".to_string(), "0".to_string());
-            m.insert("sgx_isv_svn".to_string(), "0".to_string());
-            m
-        });
+        // Get current timestamp in seconds
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        let expired_at = current_time + ttl_seconds;
         
-        AttestationImpl::new(
+        // Create attestation with required fields
+        let mut attestation = TeeAttestation {
             tee_type,
-            public_key,
-            report,
-            signature,
-            ttl_seconds,
-            signer_id,
-            "1.0.0".to_string(),
-            metadata,
-        )
+            public_key: public_key.clone(),
+            report: report.clone(),
+            signature: signature.clone(),
+            signer_id: signer_id.clone(),
+            created_at: current_time,
+            expired_at,
+            is_revoked: false,
+            version: "1.0.0".to_string(),
+            metadata: metadata.unwrap_or_default(),
+        };
+        
+        // Validate the attestation
+        attestation.validate()?;
+        
+        Ok(attestation)
     }
     
     // Helper function to create a test context
@@ -138,7 +145,6 @@ mod test_utils {
             .signer_account_pk(PublicKey::empty(near_sdk::env::sig_ed25519_version()))
             .is_view(is_view)
             .build()
-    }
     }
 }
 
@@ -290,8 +296,8 @@ fn test_sgx_signature_verification_basic() {
     let verification_result = contract.verify_tee_signature(
         TeeType::Sgx,
         public_key,
-        report_data.to_vec(),
-        signature_str,
+        b"test message".to_vec(),
+        "valid_signature".to_string(),
     );
     
     match verification_result {

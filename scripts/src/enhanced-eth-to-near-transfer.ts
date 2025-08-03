@@ -636,7 +636,7 @@ function loadTestConfiguration(): TestConfig {
       ethereumRpcUrl: process.env.ETHEREUM_RPC_URL || process.env.SEPOLIA_RPC_URL,
       privateKey: process.env.PRIVATE_KEY,
       nearBridgeAddress: process.env.NEAR_BRIDGE || process.env.RESOLVER_ADDRESS,
-      transferAmount: process.env.TRANSFER_AMOUNT || '0.01',
+      transferAmount: process.env.ETH_TRANSFER_AMOUNT || '0.01',
       timelock: parseInt(process.env.TIMELOCK_DURATION || '3600'),
       recipient: process.env.RECIPIENT || 'fusionswap.testnet',
       logLevel: process.env.LOG_LEVEL || 'info'

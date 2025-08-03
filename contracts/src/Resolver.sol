@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity 0.8.23;
+pragma solidity ^0.8.23;
 
-import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
-import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IOrderMixin} from "../lib/limit-order-protocol/contracts/interfaces/IOrderMixin.sol";
 import {TakerTraits} from "../lib/limit-order-protocol/contracts/libraries/TakerTraitsLib.sol";
@@ -16,6 +18,8 @@ import {TimelocksLib, Timelocks} from "../lib/cross-chain-swap/contracts/librari
 import {Address, AddressLib} from "../lib/solidity-utils/contracts/libraries/AddressLib.sol";
 import {IEscrow} from "../lib/cross-chain-swap/contracts/interfaces/IEscrow.sol";
 import {ImmutablesLib} from "../lib/cross-chain-swap/contracts/libraries/ImmutablesLib.sol";
+
+import "./interfaces/IPartialFillHandler.sol";
 
 // NEAR-specific interfaces
 interface INearBridge {
@@ -39,7 +43,9 @@ interface INearToken {
  *
  * @custom:security-contact security@1inch.io
  */
-contract Resolver is IResolverExample, Ownable {
+contract Resolver is IResolverExample, IPartialFillHandler, Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    
     // Events for NEAR integration
     event NearDepositInitiated(
         address indexed sender,
@@ -52,6 +58,16 @@ contract Resolver is IResolverExample, Ownable {
     // Constants for NEAR integration
     uint256 public constant NEAR_CHAIN_ID = 397;
     uint256 public constant MIN_NEAR_DEPOSIT = 0.1 ether; // Minimum deposit amount
+    
+    // Partial fills state
+    mapping(bytes32 => OrderState) private _orderStates;
+    mapping(bytes32 => FillDetails[]) private _fillHistory;
+    mapping(bytes32 => bytes32[]) private _childOrders; // parentOrderHash => childOrderHashes
+    mapping(bytes32 => bytes32) private _parentOrders; // childOrderHash => parentOrderHash
+    
+    // Default values for partial fills
+    uint256 public constant DEFAULT_MIN_FILL_PERCENT = 10; // 10% minimum fill
+    uint256 public constant DEFAULT_MAX_FILLS = 10; // Maximum 10 partial fills per order
     
     // Struct to track NEAR deposits
     struct NearDeposit {
@@ -83,6 +99,182 @@ contract Resolver is IResolverExample, Ownable {
      * @param immutables The immutables from the escrow
      * @param secret The secret used for the hashlock
      */
+    /**
+     * @notice Process a partial fill of an order
+     * @param orderHash The hash of the order being filled
+     * @param fillAmount The amount being filled in this partial fill
+     * @param secretHash The secret hash for cross-chain coordination
+     */
+    function processPartialFill(
+        bytes32 orderHash,
+        uint256 fillAmount,
+        bytes32 secretHash
+    ) external override nonReentrant returns (bool) {
+        require(fillAmount > 0, "Invalid fill amount");
+        
+        OrderState storage orderState = _orderStates[orderHash];
+        require(!orderState.isFullyFilled, "Order already fully filled");
+        require(!orderState.isCancelled, "Order is cancelled");
+        require(orderState.fillCount < DEFAULT_MAX_FILLS, "Maximum fills reached");
+        
+        // Calculate minimum fill amount (10% of remaining or specified minimum)
+        uint256 minFillAmount = (orderState.remainingAmount * DEFAULT_MIN_FILL_PERCENT) / 100;
+        require(fillAmount >= minFillAmount, "Fill amount below minimum");
+        
+        // Update order state
+        orderState.filledAmount += fillAmount;
+        orderState.remainingAmount -= fillAmount;
+        orderState.fillCount++;
+        orderState.lastFillTimestamp = block.timestamp;
+        
+        // Record fill in history
+        bytes32 fillId = keccak256(abi.encodePacked(orderHash, block.timestamp, fillAmount));
+        _fillHistory[orderHash].push(FillDetails({
+            timestamp: block.timestamp,
+            amount: fillAmount,
+            fillId: fillId
+        }));
+        
+        // Check if order is now fully filled
+        if (orderState.remainingAmount == 0) {
+            orderState.isFullyFilled = true;
+        }
+        
+        emit OrderPartiallyFilled(
+            orderHash,
+            orderState.filledAmount,
+            orderState.remainingAmount,
+            orderState.fillCount,
+            secretHash
+        );
+        
+        return true;
+    }
+    
+    /**
+     * @notice Split an order into multiple child orders
+     * @param orderHash The hash of the order to split
+     * @param amounts Array of amounts for each child order
+     * @param secretHash The secret hash for cross-chain coordination
+     */
+    function splitOrder(
+        bytes32 orderHash,
+        uint256[] calldata amounts,
+        bytes32 secretHash
+    ) external override onlyOwner nonReentrant returns (bytes32[] memory) {
+        require(amounts.length > 1, "At least 2 amounts required");
+        
+        OrderState storage parentState = _orderStates[orderHash];
+        require(!parentState.isFullyFilled, "Order already fully filled");
+        require(!parentState.isCancelled, "Order is cancelled");
+        
+        uint256 totalAmount = 0;
+        bytes32[] memory childHashes = new bytes32[](amounts.length);
+        
+        // Create child orders
+        for (uint256 i = 0; i < amounts.length; i++) {
+            require(amounts[i] > 0, "Invalid amount");
+            
+            // Create a new order hash for the child
+            bytes32 childHash = keccak256(abi.encodePacked(
+                orderHash,
+                block.timestamp,
+                i,
+                amounts[i]
+            ));
+            
+            // Initialize child order state
+            _orderStates[childHash] = OrderState({
+                filledAmount: 0,
+                remainingAmount: amounts[i],
+                fillCount: 0,
+                isFullyFilled: false,
+                isCancelled: false,
+                lastFillTimestamp: 0,
+                fillHistory: new bytes32[](0),
+                childOrders: new bytes32[](0)
+            });
+            
+            // Track parent-child relationship
+            _parentOrders[childHash] = orderHash;
+            childHashes[i] = childHash;
+            totalAmount += amounts[i];
+        }
+        
+        // Verify total amount matches parent's remaining amount
+        require(totalAmount == parentState.remainingAmount, "Invalid split amounts");
+        
+        // Update parent order with child references
+        for (uint256 i = 0; i < childHashes.length; i++) {
+            parentState.childOrders.push(childHashes[i]);
+        }
+        
+        emit OrderSplit(orderHash, childHashes, amounts, secretHash);
+        return childHashes;
+    }
+    
+    /**
+     * @notice Process refund for an unfilled order portion
+     * @param orderHash The hash of the order to refund
+     * @param refundRecipient The address to receive the refund
+     * @param secretHash The secret hash for cross-chain coordination
+     */
+    function processRefund(
+        bytes32 orderHash,
+        address refundRecipient,
+        bytes32 secretHash
+    ) external override onlyOwner nonReentrant returns (bool) {
+        OrderState storage orderState = _orderStates[orderHash];
+        require(!orderState.isFullyFilled, "Order is fully filled");
+        require(!orderState.isCancelled, "Order already cancelled");
+        require(orderState.remainingAmount > 0, "No amount to refund");
+        
+        // Mark order as cancelled to prevent further fills
+        orderState.isCancelled = true;
+        
+        // In a real implementation, this would transfer the tokens back to the refundRecipient
+        // For now, we'll just emit an event
+        emit RefundIssued(
+            refundRecipient,
+            address(0), // token address (0 for native token)
+            orderState.remainingAmount,
+            orderHash,
+            secretHash
+        );
+        
+        return true;
+    }
+    
+    /**
+     * @notice Get the current state of an order
+     * @param orderHash The hash of the order
+     */
+    function getOrderState(
+        bytes32 orderHash
+    ) external view override returns (OrderState memory) {
+        return _orderStates[orderHash];
+    }
+    
+    /**
+     * @notice Get fill history for an order
+     * @param orderHash The hash of the order
+     */
+    function getFillHistory(
+        bytes32 orderHash
+    ) external view override returns (FillDetails[] memory) {
+        return _fillHistory[orderHash];
+    }
+    
+    /**
+     * @notice Get child orders for a parent order
+     * @param orderHash The hash of the parent order
+     */
+    function getChildOrders(
+        bytes32 orderHash
+    ) external view override returns (bytes32[] memory) {
+        return _childOrders[orderHash];
+    }
+    
     function _handleNearDeposit(
         IBaseEscrow.Immutables memory immutables,
         bytes32 secret

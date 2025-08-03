@@ -213,6 +213,26 @@ export interface NearAccount {
   }): Promise<any>;
 }
 
+// Partial fill interfaces
+export interface PartialFillParams {
+  orderId: string;
+  fillAmount: string;
+  recipient: string;
+  token: string;
+  minFillPercent?: number;
+  maxFills?: number;
+}
+
+export interface OrderState {
+  filledAmount: string;
+  remainingAmount: string;
+  fillCount: number;
+  isFullyFilled: boolean;
+  isCancelled: boolean;
+  lastFillTimestamp: number;
+  childOrders: string[];
+}
+
 // Configuration interfaces
 export interface RelayerConfig {
   ethereum: {

@@ -21,9 +21,11 @@ const EscrowABI = [
 ] as const;
 
 const EscrowFactoryABI = [
-  'function createDstEscrow(tuple(bytes32 orderHash, bytes32 hashlock, address maker, address taker, address token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) dstImmutables, uint256 srcCancellationTimestamp) external payable returns (address)',
-  'function addressOfEscrowSrc(tuple(bytes32 orderHash, bytes32 hashlock, address maker, address taker, address token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) immutables) external view returns (address)',
-  'event DstEscrowCreated(address escrow, bytes32 hashlock, address taker)'
+  // CRITICAL: Address custom type must be uint256 in ABI (per Solidity spec: user-defined types encoded as underlying type)
+  // 1inch Address type wraps uint256, so ABI must use uint256 for maker, taker, token
+  'function createDstEscrow(tuple(bytes32 orderHash, bytes32 hashlock, uint256 maker, uint256 taker, uint256 token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) dstImmutables, uint256 srcCancellationTimestamp) external payable returns (address)',
+  'function addressOfEscrowSrc(tuple(bytes32 orderHash, bytes32 hashlock, uint256 maker, uint256 taker, uint256 token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) immutables) external view returns (address)',
+  'event DstEscrowCreated(address escrow, bytes32 hashlock, uint256 taker)'
 ] as const;
 
 export interface EscrowSearchParams {
@@ -75,11 +77,28 @@ export class EthereumContractService implements IContractService {
   }
 
   /**
+   * Get the signer's address
+   */
+  async getSignerAddress(): Promise<string> {
+    try {
+      return await this.signer.getAddress();
+    } catch (error) {
+      throw new ContractError(
+        'Failed to get signer address',
+        'N/A',
+        'getSignerAddress',
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+  }
+
+  /**
    * Execute a transaction on the factory contract
    */
   async executeFactoryTransaction(
     method: string,
-    params: any[]
+    params: any[],
+    value?: ethers.BigNumber
   ): Promise<ethers.ContractTransaction> {
     try {
       if (!method || typeof method !== 'string') {
@@ -93,8 +112,25 @@ export class EthereumContractService implements IContractService {
       // Use factory contract with signer for write operations
       const factoryWithSigner = this.factoryContract.connect(this.signer);
       
+      // Prepare transaction options
+      const txOptions: any = {
+        gasLimit: 1500000 // Increased gas limit for escrow creation (was 800k, now 1.5M)
+      };
+      if (value && value.gt(0)) {
+        txOptions.value = value;
+        logger.info('Sending ETH value with transaction', {
+          method,
+          ethValue: ethers.utils.formatEther(value)
+        });
+      }
+      
+      logger.info('Using manual gas limit to bypass estimation', {
+        method,
+        gasLimit: txOptions.gasLimit
+      });
+
       // Execute the transaction
-      const tx = await factoryWithSigner[method](...params);
+      const tx = await factoryWithSigner[method](...params, txOptions);
       
       logger.info('Factory transaction executed successfully', {
         factoryAddress: this.factoryContract.address,
