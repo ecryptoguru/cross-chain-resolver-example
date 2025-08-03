@@ -6,6 +6,7 @@ import { KeyPairSigner } from '@near-js/signers';
 import { EthereumRelayer } from './relay/EthereumRelayer.js';
 import { NearRelayer } from './relay/NearRelayer.js';
 import { logger } from './utils/logger.js';
+import type { NearAccount } from './types/interfaces.js';
 
 // Load environment variables
 dotenv.config();
@@ -50,14 +51,14 @@ async function main() {
     );
     
     // Create wrapper object with expected interface for NEAR relayer compatibility
-    const nearAccount = {
+    const nearAccount: NearAccount = {
       ...account,
       connection: {
-        provider: provider as unknown as any,
+        provider: provider as unknown as any, // TODO: Create proper NearProvider interface
         signer,
       },
       functionCall: account.functionCall.bind(account)
-    } as any;
+    };
 
     logger.info(`Connected to NEAR network: ${process.env.NEAR_NETWORK_ID}`);
     logger.info(`NEAR account ID: ${nearAccount.accountId}`);
@@ -66,9 +67,10 @@ async function main() {
     const ethereumRelayer = new EthereumRelayer({
       provider: ethereumSigner.provider as ethers.providers.JsonRpcProvider,
       signer: ethereumSigner,
-      nearAccount: nearAccount as any,
+      nearAccount: nearAccount as NearAccount,
       factoryAddress: process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS!,
       bridgeAddress: process.env.ETHEREUM_BRIDGE_ADDRESS!,
+      resolverAddress: process.env.RESOLVER_ADDRESS || process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS!,
       storageDir: process.env.STORAGE_DIR || './storage',
       pollIntervalMs: parseInt(process.env.RELAYER_POLL_INTERVAL || '5000', 10)
     });

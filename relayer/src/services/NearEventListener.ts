@@ -12,6 +12,7 @@ export interface NearEventHandlers {
   onSwapOrderCreated?: (event: SwapOrderCreatedEvent) => Promise<void>;
   onSwapOrderCompleted?: (event: SwapOrderCompletedEvent) => Promise<void>;
   onSwapOrderRefunded?: (event: SwapOrderRefundedEvent) => Promise<void>;
+  onSwapOrderPartiallyFilled?: (event: SwapOrderPartiallyFilledEvent) => Promise<void>;
   onTransactionProcessed?: (event: TransactionProcessedEvent) => Promise<void>;
 }
 
@@ -38,6 +39,17 @@ export interface SwapOrderRefundedEvent {
   reason: string;
   blockHeight: number;
   transactionHash: string;
+  secretHash?: string; // Optional for cross-chain refunds
+}
+
+export interface SwapOrderPartiallyFilledEvent {
+  orderId: string;
+  filledAmount: string;
+  remainingAmount: string;
+  fillCount: number;
+  blockHeight: number;
+  transactionHash: string;
+  secretHash?: string; // Optional for cross-chain partial fills
 }
 
 export interface TransactionProcessedEvent {

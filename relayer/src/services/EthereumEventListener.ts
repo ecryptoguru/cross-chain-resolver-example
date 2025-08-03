@@ -26,6 +26,8 @@ export interface EthereumEventHandlers {
   onMessageSent?: (event: MessageSentEvent) => Promise<void>;
   onWithdrawalCompleted?: (event: WithdrawalCompletedEvent) => Promise<void>;
   onEscrowCreated?: (event: EscrowCreatedEvent) => Promise<void>;
+  onOrderPartiallyFilled?: (event: OrderPartiallyFilledEvent) => Promise<void>;
+  onOrderRefunded?: (event: OrderRefundedEvent) => Promise<void>;
 }
 
 export interface DepositInitiatedEvent {
@@ -65,6 +67,28 @@ export interface EscrowCreatedEvent {
   amount: bigint;
   targetChain: string;
   targetAddress: string;
+  blockNumber: number;
+  transactionHash: string;
+}
+
+export interface OrderPartiallyFilledEvent {
+  orderHash: string;
+  fillAmount: string;
+  remainingAmount: string;
+  fillCount: number;
+  recipient: string;
+  token: string;
+  secretHash?: string; // For cross-chain coordination
+  blockNumber: number;
+  transactionHash: string;
+}
+
+export interface OrderRefundedEvent {
+  orderHash: string;
+  recipient: string;
+  refundAmount: string;
+  reason: string;
+  secretHash?: string; // For cross-chain coordination
   blockNumber: number;
   transactionHash: string;
 }

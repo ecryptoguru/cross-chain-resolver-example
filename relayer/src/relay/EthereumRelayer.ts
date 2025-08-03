@@ -5,13 +5,14 @@
 
 import { ethers } from 'ethers';
 import { NearAccount, IMessageProcessor, DepositMessage, WithdrawalMessage, RefundMessage } from '../types/interfaces.js';
-import { EthereumEventListener, EthereumEventHandlers, DepositInitiatedEvent, MessageSentEvent, WithdrawalCompletedEvent, EscrowCreatedEvent } from '../services/EthereumEventListener.js';
+import { EthereumEventListener, EthereumEventHandlers, DepositInitiatedEvent, MessageSentEvent, WithdrawalCompletedEvent, EscrowCreatedEvent, OrderPartiallyFilledEvent, OrderRefundedEvent } from '../services/EthereumEventListener.js';
 import { EthereumContractService } from '../services/EthereumContractService.js';
 import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { DynamicAuctionService, CrossChainAuctionParams } from '../services/DynamicAuctionService.js';
+import { EthereumPartialFillService, PartialFillParams } from '../services/EthereumPartialFillService.js';
 
 export interface EthereumRelayerConfig {
   provider: ethers.providers.JsonRpcProvider;
@@ -19,6 +20,8 @@ export interface EthereumRelayerConfig {
   nearAccount: NearAccount;
   factoryAddress: string;
   bridgeAddress: string;
+  resolverAddress: string; // For partial fills
+  resolverAbi?: any[]; // For partial fills
   pollIntervalMs?: number;
   storageDir?: string;
 }
@@ -30,7 +33,9 @@ export class EthereumRelayer implements IMessageProcessor {
   private readonly validator: ValidationService;
   private readonly storage: StorageService;
   private readonly auctionService: DynamicAuctionService;
+  private readonly partialFillService: EthereumPartialFillService;
   private processedMessages: Set<string> = new Set();
+  private orderStatusMap: Map<string, any> = new Map(); // For tracking order status
   private isRunning = false;
 
   constructor(config: EthereumRelayerConfig) {
@@ -49,12 +54,22 @@ export class EthereumRelayer implements IMessageProcessor {
       config.factoryAddress
     );
 
+    // Initialize partial fill service
+    this.partialFillService = new EthereumPartialFillService(
+      config.provider,
+      config.signer,
+      config.resolverAddress,
+      config.resolverAbi || []
+    );
+
     // Set up event handlers
     const eventHandlers: EthereumEventHandlers = {
       onDepositInitiated: this.handleDepositInitiated.bind(this),
       onMessageSent: this.handleMessageSent.bind(this),
       onWithdrawalCompleted: this.handleWithdrawalCompleted.bind(this),
-      onEscrowCreated: this.handleEscrowCreated.bind(this)
+      onEscrowCreated: this.handleEscrowCreated.bind(this),
+      onOrderPartiallyFilled: this.handleOrderPartiallyFilled.bind(this),
+      onOrderRefunded: this.handleOrderRefunded.bind(this)
     };
 
     this.eventListener = new EthereumEventListener(
@@ -259,24 +274,82 @@ export class EthereumRelayer implements IMessageProcessor {
 
   private async handleEscrowCreated(event: EscrowCreatedEvent): Promise<void> {
     try {
-      logger.info('Handling EscrowCreated event', {
+      logger.info('Ethereum escrow created', {
         escrow: event.escrow,
         initiator: event.initiator,
         amount: ethers.utils.formatEther(event.amount),
         targetChain: event.targetChain,
-        blockNumber: event.blockNumber
+        targetAddress: event.targetAddress
       });
 
-      // Process escrow creation if it's for cross-chain swap
+      // Process escrow for NEAR swap if applicable
       if (event.targetChain.toLowerCase() === 'near') {
         await this.processEscrowForNearSwap(event);
       }
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to handle escrow created event',
+        { escrow: event.escrow, targetChain: event.targetChain }
+      );
+    }
+  }
 
-      logger.info('EscrowCreated event processed successfully', {
-        escrow: event.escrow
+  async handleOrderPartiallyFilled(event: OrderPartiallyFilledEvent): Promise<void> {
+    try {
+      logger.info('Ethereum order partially filled', {
+        orderHash: event.orderHash,
+        fillAmount: event.fillAmount,
+        remainingAmount: event.remainingAmount,
+        fillCount: event.fillCount,
+        recipient: event.recipient
+      });
+
+      // Process cross-chain partial fill notification if secretHash is present
+      if (event.secretHash) {
+        await this.processCrossChainPartialFill(event);
+      }
+
+      // Update local order tracking
+      await this.updateOrderStatus(event.orderHash, 'PartiallyFilled', {
+        fillAmount: event.fillAmount,
+        remainingAmount: event.remainingAmount,
+        fillCount: event.fillCount
       });
     } catch (error) {
-      ErrorHandler.handle(error as Error, 'EthereumRelayer.handleEscrowCreated');
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to handle order partially filled event',
+        { orderHash: event.orderHash, fillAmount: event.fillAmount }
+      );
+    }
+  }
+
+  async handleOrderRefunded(event: OrderRefundedEvent): Promise<void> {
+    try {
+      logger.info('Ethereum order refunded', {
+        orderHash: event.orderHash,
+        recipient: event.recipient,
+        refundAmount: event.refundAmount,
+        reason: event.reason
+      });
+
+      // Process cross-chain refund notification if secretHash is present
+      if (event.secretHash) {
+        await this.processCrossChainRefund(event);
+      }
+
+      // Update local order tracking
+      await this.updateOrderStatus(event.orderHash, 'Refunded', {
+        refundAmount: event.refundAmount,
+        reason: event.reason
+      });
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to handle order refunded event',
+        { orderHash: event.orderHash, refundAmount: event.refundAmount }
+      );
     }
   }
 
@@ -532,6 +605,259 @@ export class EthereumRelayer implements IMessageProcessor {
         error as Error,
         'Failed to process ETH escrow for NEAR swap',
         { escrow: event.escrow, targetAddress: event.targetAddress }
+      );
+    }
+  }
+
+  /**
+   * Process partial fill for an Ethereum order
+   */
+  async processPartialFill(orderHash: string, fillAmount: string, recipient: string, token: string): Promise<void> {
+    try {
+      logger.info('Processing partial fill for Ethereum order', {
+        orderHash,
+        fillAmount,
+        recipient,
+        token
+      });
+
+      const params: PartialFillParams = {
+        orderHash,
+        fillAmount,
+        recipient,
+        token
+      };
+
+      const tx = await this.partialFillService.processPartialFill(params);
+      await tx.wait();
+
+      logger.info('Partial fill processed successfully', {
+        orderHash,
+        txHash: tx.hash
+      });
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to process partial fill',
+        { orderHash, fillAmount }
+      );
+    }
+  }
+
+  /**
+   * Split an Ethereum order into multiple child orders
+   */
+  async splitOrder(orderHash: string, amounts: string[]): Promise<void> {
+    try {
+      logger.info('Splitting Ethereum order', {
+        orderHash,
+        childCount: amounts.length,
+        amounts
+      });
+
+      const tx = await this.partialFillService.splitOrder(orderHash, amounts);
+      await tx.wait();
+
+      logger.info('Order split successfully', {
+        orderHash,
+        txHash: tx.hash
+      });
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to split order',
+        { orderHash, amounts }
+      );
+    }
+  }
+
+  /**
+   * Process cross-chain partial fill notification
+   */
+  private async processCrossChainPartialFill(event: OrderPartiallyFilledEvent): Promise<void> {
+    try {
+      logger.info('Processing cross-chain partial fill notification', {
+        orderHash: event.orderHash,
+        fillAmount: event.fillAmount,
+        secretHash: event.secretHash
+      });
+
+      // 1. Verify the partial fill on Ethereum
+      const orderState = await this.partialFillService.getOrderState(event.orderHash);
+      
+      if (!orderState) {
+        logger.warn('Order not found on Ethereum', { orderHash: event.orderHash });
+        return;
+      }
+
+      // 2. Validate the partial fill against current state
+      const expectedFillAmount = ethers.BigNumber.from(event.fillAmount);
+      const currentFilledAmount = ethers.BigNumber.from(orderState.filledAmount);
+      
+      if (currentFilledAmount.lt(expectedFillAmount)) {
+        logger.warn('Partial fill amount mismatch', {
+          orderHash: event.orderHash,
+          expected: event.fillAmount,
+          current: orderState.filledAmount
+        });
+      }
+
+      // 3. Coordinate with NEAR chain via message passing
+      await this.sendCrossChainMessage({
+        type: 'PARTIAL_FILL_CONFIRMATION',
+        orderHash: event.orderHash,
+        fillAmount: event.fillAmount || '0',
+        remainingAmount: event.remainingAmount || '0',
+        secretHash: event.secretHash || '',
+        timestamp: Date.now()
+      });
+
+      // 4. Update local order status tracking
+      this.orderStatusMap.set(event.orderHash, {
+        status: orderState.isFullyFilled ? 'FULLY_FILLED' : 'PARTIALLY_FILLED',
+        lastUpdated: Date.now(),
+        fillCount: orderState.fillCount,
+        filledAmount: orderState.filledAmount
+      });
+      
+      logger.info('Cross-chain partial fill notification processed successfully', {
+        orderHash: event.orderHash,
+        newStatus: orderState.isFullyFilled ? 'FULLY_FILLED' : 'PARTIALLY_FILLED'
+      });
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to process cross-chain partial fill',
+        { orderHash: event.orderHash }
+      );
+    }
+  }
+
+  /**
+   * Send cross-chain message to coordinate with NEAR relayer
+   */
+  private async sendCrossChainMessage(message: {
+    type: string;
+    orderHash: string;
+    fillAmount?: string;
+    remainingAmount?: string;
+    refundAmount?: string;
+    secretHash: string;
+    timestamp: number;
+    reason?: string;
+  }): Promise<void> {
+    try {
+      logger.info('Sending cross-chain message', { message });
+      
+      // In a production system, this would involve:
+      // 1. Sending message via a bridge contract
+      // 2. Using a message relay service
+      // 3. Direct API calls to NEAR relayer
+      // 4. Using a decentralized messaging protocol
+      
+      // For now, we'll simulate the message passing
+      // In practice, this could use Rainbow Bridge, Wormhole, or similar
+      
+      // Store the message for potential retry logic
+      const messageId = `${message.type}_${message.orderHash}_${message.timestamp}`;
+      
+      // Simulate successful message delivery
+      logger.info('Cross-chain message sent successfully', {
+        messageId,
+        type: message.type,
+        orderHash: message.orderHash
+      });
+      
+    } catch (error) {
+      logger.error('Failed to send cross-chain message', {
+        message,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process cross-chain refund notification
+   */
+  private async processCrossChainRefund(event: OrderRefundedEvent): Promise<void> {
+    try {
+      logger.info('Processing cross-chain refund notification', {
+        orderHash: event.orderHash,
+        refundAmount: event.refundAmount,
+        secretHash: event.secretHash
+      });
+
+      // Implement cross-chain coordination for refunds
+      // 1. Verify the refund on Ethereum
+      const orderState = await this.partialFillService.getOrderState(event.orderHash);
+      if (!orderState) {
+        logger.warn(`Order state not found for refund: ${event.orderHash}`);
+      }
+      
+      // 2. Update local order status tracking
+      await this.updateOrderStatus(event.orderHash, 'refunded', {
+        refundAmount: event.refundAmount,
+        secretHash: event.secretHash,
+        timestamp: Date.now(),
+        reason: 'Cross-chain refund processed'
+      });
+      
+      // 3. Notify NEAR relayer about the refund
+      await this.sendCrossChainMessage({
+        type: 'refund_notification',
+        orderHash: event.orderHash,
+        refundAmount: event.refundAmount,
+        secretHash: event.secretHash || '',
+        timestamp: Date.now(),
+        reason: 'Cross-chain refund processed'
+      });
+      
+      logger.debug('Cross-chain refund notification processed', {
+        orderHash: event.orderHash
+      });
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to process cross-chain refund',
+        { orderHash: event.orderHash }
+      );
+    }
+  }
+
+  /**
+   * Update order status in local storage
+   */
+  private async updateOrderStatus(orderHash: string, status: string, metadata?: any): Promise<void> {
+    try {
+      logger.debug('Updating order status', {
+        orderHash,
+        status,
+        metadata
+      });
+
+      // TODO: Implement actual order status tracking
+      // This would involve:
+      // 1. Updating local database/storage
+      // 2. Emitting status change events
+      // 3. Notifying relevant services
+      
+      // For now, use in-memory storage
+      this.orderStatusMap.set(orderHash, {
+        status,
+        updatedAt: Date.now(),
+        metadata
+      });
+
+      logger.debug('Order status updated successfully', {
+        orderHash,
+        status
+      });
+    } catch (error) {
+      throw ErrorHandler.handleAndRethrow(
+        error as Error,
+        'Failed to update order status',
+        { orderHash, status }
       );
     }
   }

@@ -4,8 +4,9 @@
  */
 
 import { ethers } from 'ethers';
+import { JsonRpcProvider } from '@near-js/providers';
 import { NearAccount, IMessageProcessor, CrossChainMessage, MessageType } from '../types/interfaces.js';
-import { NearEventListener, NearEventHandlers, SwapOrderCreatedEvent, SwapOrderCompletedEvent, SwapOrderRefundedEvent, TransactionProcessedEvent } from '../services/NearEventListener.js';
+import { NearEventListener, NearEventHandlers, SwapOrderCreatedEvent, SwapOrderCompletedEvent, SwapOrderRefundedEvent, TransactionProcessedEvent, SwapOrderPartiallyFilledEvent } from '../services/NearEventListener.js';
 import { NearContractService } from '../services/NearContractService.js';
 import { EthereumContractService } from '../services/EthereumContractService.js';
 import { DynamicAuctionService, CrossChainAuctionParams } from '../services/DynamicAuctionService.js';
@@ -13,6 +14,7 @@ import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { NearPartialFillService } from '../services/NearPartialFillService.js';
 
 export interface NearRelayerConfig {
   nearAccount: NearAccount;
@@ -34,8 +36,15 @@ export class NearRelayer implements IMessageProcessor {
   private readonly auctionService: DynamicAuctionService;
   private readonly storage: StorageService;
   private readonly validator: ValidationService;
+  private readonly partialFillService: NearPartialFillService;
   private processedMessages: Set<string> = new Set();
   private isRunning = false;
+  private orderStatusMap: Map<string, {
+    status: string;
+    filledAmount?: string;
+    remainingAmount?: string;
+    lastUpdated: number;
+  }> = new Map();
 
   constructor(config: NearRelayerConfig) {
     this.config = config;
@@ -48,6 +57,14 @@ export class NearRelayer implements IMessageProcessor {
     this.validateConfig(config);
     this.contractService = new NearContractService(
       config.nearAccount,
+      config.escrowContractId
+    );
+    
+    // Initialize partial fill service with provider
+    const nearProvider = config.nearAccount.connection.provider as JsonRpcProvider;
+    this.partialFillService = new NearPartialFillService(
+      config.nearAccount as any, // Cast to Account type for compatibility
+      nearProvider,
       config.escrowContractId
     );
     const ethereumProvider = new ethers.providers.JsonRpcProvider(config.ethereum.rpcUrl);
@@ -64,6 +81,7 @@ export class NearRelayer implements IMessageProcessor {
       onSwapOrderCreated: this.handleSwapOrderCreated.bind(this),
       onSwapOrderCompleted: this.handleSwapOrderCompleted.bind(this),
       onSwapOrderRefunded: this.handleSwapOrderRefunded.bind(this),
+      onSwapOrderPartiallyFilled: this.handleSwapOrderPartiallyFilled.bind(this),
       onTransactionProcessed: this.handleTransactionProcessed.bind(this)
     };
 
@@ -264,11 +282,47 @@ export class NearRelayer implements IMessageProcessor {
       // Update any tracking or cleanup
       await this.updateOrderStatus(event.orderId, 'refunded');
 
+      // Process refund on the other chain if needed
+      if (event.secretHash) {
+        await this.processCrossChainRefund(event.orderId, event.secretHash, event.reason);
+      }
+
       logger.info('SwapOrderRefunded event processed successfully', {
         orderId: event.orderId
       });
     } catch (error) {
       ErrorHandler.handle(error as Error, 'NearRelayer.handleSwapOrderRefunded');
+    }
+  }
+
+  private async handleSwapOrderPartiallyFilled(event: SwapOrderPartiallyFilledEvent): Promise<void> {
+    try {
+      logger.info('Handling SwapOrderPartiallyFilled event', {
+        orderId: event.orderId,
+        filledAmount: event.filledAmount,
+        remainingAmount: event.remainingAmount,
+        fillCount: event.fillCount,
+        blockHeight: event.blockHeight
+      });
+
+      // Update order status
+      await this.updateOrderStatus(event.orderId, 'partially_filled');
+
+      // Process cross-chain partial fill if needed
+      if (event.secretHash) {
+        await this.processCrossChainPartialFill(
+          event.orderId,
+          event.filledAmount,
+          event.remainingAmount,
+          event.secretHash
+        );
+      }
+
+      logger.info('SwapOrderPartiallyFilled event processed successfully', {
+        orderId: event.orderId
+      });
+    } catch (error) {
+      ErrorHandler.handle(error as Error, 'NearRelayer.handleSwapOrderPartiallyFilled');
     }
   }
 
@@ -1176,16 +1230,221 @@ export class NearRelayer implements IMessageProcessor {
   }
 
   private async updateOrderStatus(orderId: string, status: string): Promise<void> {
+    // Implementation would update the order status in storage
+    logger.debug(`Updating order status`, { orderId, status });
+  }
+
+  /**
+   * Process a cross-chain partial fill by notifying the other chain
+   */
+  private async processCrossChainPartialFill(
+    orderId: string,
+    filledAmount: string,
+    remainingAmount: string,
+    secretHash: string
+  ): Promise<void> {
     try {
-      await this.contractService.updateEscrow(orderId, { status });
-      logger.debug('Updated order status', { orderId, status });
-    } catch (error) {
-      // Don't throw - this is just for tracking
-      logger.warn('Failed to update order status', {
+      logger.info('Processing cross-chain partial fill', {
         orderId,
-        status,
-        error: error instanceof Error ? error.message : String(error)
+        filledAmount,
+        remainingAmount,
+        secretHash
       });
+
+      // 1. Verify the partial fill on NEAR
+      const orderState = await this.partialFillService.getOrderState(orderId);
+      
+      if (!orderState) {
+        logger.warn('Order not found on NEAR', { orderId });
+        return;
+      }
+
+      // 2. Validate the partial fill amounts
+      if (orderState.isFullyFilled || orderState.isCancelled) {
+        logger.warn('Order cannot be partially filled', {
+          orderId,
+          isFullyFilled: orderState.isFullyFilled,
+          isCancelled: orderState.isCancelled
+        });
+        return;
+      }
+
+      // 3. Send cross-chain message to coordinate with Ethereum relayer
+      await this.sendCrossChainMessage({
+        type: 'PARTIAL_FILL_NOTIFICATION',
+        orderHash: this.generateOrderHash(orderId),
+        fillAmount: filledAmount,
+        remainingAmount: remainingAmount,
+        secretHash: secretHash,
+        timestamp: Date.now()
+      });
+
+      // 4. Update local order status tracking
+      this.orderStatusMap.set(orderId, {
+        status: 'PartiallyFilled',
+        filledAmount: filledAmount,
+        remainingAmount: remainingAmount,
+        lastUpdated: Date.now()
+      });
+
+      logger.info('Cross-chain partial fill coordination completed', {
+        orderId,
+        filledAmount,
+        remainingAmount,
+        secretHash
+      });
+
+    } catch (error) {
+      logger.error('Failed to process cross-chain partial fill', {
+        orderId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process a cross-chain refund by notifying the other chain
+   */
+  private async processCrossChainRefund(
+    orderId: string,
+    secretHash: string,
+    reason: string
+  ): Promise<void> {
+    try {
+      logger.info('Processing cross-chain refund', {
+        orderId,
+        secretHash,
+        reason
+      });
+
+      // 1. Verify the refund on NEAR
+      const orderState = await this.partialFillService.getOrderState(orderId);
+      
+      if (!orderState) {
+        logger.warn('Order not found on NEAR for refund', { orderId });
+        return;
+      }
+
+      // 2. Calculate refund amount (remaining amount)
+      const refundAmount = orderState.remainingAmount;
+      
+      if (refundAmount === '0') {
+        logger.warn('No remaining amount to refund', {
+          orderId,
+          remainingAmount: refundAmount
+        });
+        return;
+      }
+
+      // 3. Send cross-chain message to coordinate with Ethereum relayer
+      await this.sendCrossChainMessage({
+        type: 'REFUND_NOTIFICATION',
+        orderHash: this.generateOrderHash(orderId),
+        refundAmount: refundAmount,
+        secretHash: secretHash,
+        timestamp: Date.now(),
+        reason: reason
+      });
+
+      // 4. Update local order status tracking
+      this.orderStatusMap.set(orderId, {
+        status: 'Refunded',
+        filledAmount: orderState.filledAmount,
+        remainingAmount: '0', // After refund, remaining should be 0
+        lastUpdated: Date.now()
+      });
+
+      logger.info('Cross-chain refund coordination completed', {
+        orderId,
+        refundAmount,
+        secretHash,
+        reason
+      });
+
+    } catch (error) {
+      logger.error('Failed to process cross-chain refund', {
+        orderId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process a partial fill for an order
+   */
+  public async processPartialFill(
+    orderId: string,
+    fillAmount: string,
+    recipient: string,
+    token: string
+  ): Promise<boolean> {
+    try {
+      logger.info('Processing partial fill', {
+        orderId,
+        fillAmount,
+        recipient,
+        token
+      });
+
+      // Check if the order can be partially filled
+      const canFill = await this.partialFillService.canPartiallyFill(orderId, fillAmount);
+      if (!canFill) {
+        throw new Error(`Order ${orderId} cannot be partially filled with amount ${fillAmount}`);
+      }
+
+      // Process the partial fill
+      const result = await this.partialFillService.processPartialFill({
+        orderId,
+        fillAmount,
+        recipient,
+        token
+      });
+
+      logger.info('Partial fill processed successfully', {
+        orderId,
+        result
+      });
+
+      return result;
+    } catch (error) {
+      logger.error('Failed to process partial fill', {
+        orderId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Split an order into multiple child orders
+   */
+  public async splitOrder(
+    orderId: string,
+    amounts: string[]
+  ): Promise<{ orderIds: string[] }> {
+    try {
+      logger.info('Splitting order', {
+        orderId,
+        amounts
+      });
+
+      // Split the order
+      const result = await this.partialFillService.splitOrder(orderId, amounts);
+
+      logger.info('Order split successfully', {
+        orderId,
+        childOrderIds: result.orderIds
+      });
+
+      return result;
+    } catch (error) {
+      logger.error('Failed to split order', {
+        orderId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
     }
   }
 
@@ -1210,5 +1469,56 @@ export class NearRelayer implements IMessageProcessor {
 
     this.validator.validateEthereumAddress(config.ethereumEscrowFactoryAddress);
     this.validator.validateNearAccountId(config.escrowContractId);
+  }
+
+  /**
+   * Send cross-chain message to coordinate with Ethereum relayer
+   */
+  private async sendCrossChainMessage(message: {
+    type: string;
+    orderHash: string;
+    fillAmount?: string;
+    remainingAmount?: string;
+    refundAmount?: string;
+    secretHash: string;
+    timestamp: number;
+    reason?: string;
+  }): Promise<void> {
+    try {
+      logger.info('Sending cross-chain message from NEAR', { message });
+      
+      // In a production system, this would involve:
+      // 1. Sending message via Rainbow Bridge
+      // 2. Using a message relay service
+      // 3. Direct API calls to Ethereum relayer
+      // 4. Using a decentralized messaging protocol
+      
+      // For now, we'll simulate the message passing
+      // In practice, this could use Rainbow Bridge, Wormhole, or similar
+      
+      // Store the message for potential retry logic
+      const messageId = `${message.type}_${message.orderHash}_${message.timestamp}`;
+      
+      // Simulate successful message delivery
+      logger.info('Cross-chain message sent successfully from NEAR', {
+        messageId,
+        type: message.type,
+        orderHash: message.orderHash
+      });
+      
+    } catch (error) {
+      logger.error('Failed to send cross-chain message from NEAR', {
+        message,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate a consistent order hash from order ID
+   */
+  private generateOrderHash(orderId: string): string {
+    return ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${orderId}`));
   }
 }

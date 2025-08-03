@@ -178,6 +178,160 @@ impl CrossChainSolverContract {
         }
     }
     
+    // ========== Partial Fill Methods ==========
+    
+    /// Process a partial fill for an existing order
+    #[payable]
+    pub fn process_partial_fill(
+        &mut self,
+        order_id: String,
+        fill_amount: u128,
+        executor: String,
+        tx_hash: Option<String>
+    ) {
+        self.assert_not_paused();
+        self.assert_authorized();
+        
+        if let Some(mut order) = self.orders.get(&order_id) {
+            match order.process_partial_fill(fill_amount, executor.clone(), tx_hash.clone()) {
+                Ok(fill_event) => {
+                    self.orders.insert(&order_id, &order);
+                    
+                    // Emit fill event
+                    emit_event!(ContractEvent::OrderFilled {
+                        order_id: order_id.clone(),
+                        filled_amount: fill_amount,
+                        executor,
+                        fill_percentage: order.get_fill_percentage() as u64,
+                        timestamp: crate::utils::env_block_timestamp_seconds(),
+                    });
+                    
+                    log!("Processed partial fill: {:?}", fill_event);
+                }
+                Err(e) => {
+                    env::panic_str(&format!("Failed to process partial fill: {}", e));
+                }
+            }
+        } else {
+            env::panic_str("Order not found");
+        }
+    }
+    
+    /// Split an order into smaller orders
+    #[payable]
+    pub fn split_order(&mut self, order_id: String, split_amounts: Vec<u128>) -> Vec<String> {
+        self.assert_not_paused();
+        self.assert_authorized();
+        
+        if let Some(mut parent_order) = self.orders.get(&order_id) {
+            match parent_order.split_order(split_amounts) {
+                Ok(child_orders) => {
+                    let mut child_ids = Vec::new();
+                    
+                    // Store child orders
+                    for child_order in child_orders {
+                        child_ids.push(child_order.id.clone());
+                        self.orders.insert(&child_order.id, &child_order);
+                        
+                        // Emit child order created event
+                        emit_event!(ContractEvent::OrderCreated {
+                            order_id: child_order.id.clone(),
+                            source_chain: child_order.source_chain.clone(),
+                            dest_chain: child_order.dest_chain.clone(),
+                            source_token: child_order.source_token.clone(),
+                            dest_token: child_order.dest_token.clone(),
+                            amount: child_order.amount,
+                            timestamp: crate::utils::env_block_timestamp_seconds(),
+                        });
+                    }
+                    
+                    // Update parent order
+                    parent_order.child_order_ids = child_ids.clone();
+                    parent_order.update_status(OrderStatus::Processing);
+                    self.orders.insert(&order_id, &parent_order);
+                    
+                    log!("Split order {} into {} child orders", order_id, child_ids.len());
+                    
+                    child_ids
+                }
+                Err(e) => {
+                    env::panic_str(&format!("Failed to split order: {}", e));
+                }
+            }
+        } else {
+            env::panic_str("Order not found");
+        }
+    }
+    
+    /// Process refunds for expired orders with unfilled portions
+    pub fn process_refunds(&mut self) -> Vec<String> {
+        self.assert_not_paused();
+        self.assert_authorized();
+        
+        let mut refunded_orders = Vec::new();
+        let order_ids: Vec<String> = self.orders.keys().collect();
+        
+        for order_id in order_ids {
+            if let Some(mut order) = self.orders.get(&order_id) {
+                if order.needs_refund() {
+                    let refund_amount = order.calculate_refund_amount();
+                    
+                    if refund_amount > 0 {
+                        // Update order status
+                        order.update_status(OrderStatus::Failed("Expired with partial refund".to_string()));
+                        order.add_metadata("refund_amount".to_string(), refund_amount.to_string());
+                        order.add_metadata("refund_processed".to_string(), "true".to_string());
+                        
+                        self.orders.insert(&order_id, &order);
+                        
+                        // Emit refund event
+                        emit_event!(ContractEvent::OrderRefunded {
+                            order_id: order_id.clone(),
+                            refund_amount,
+                            reason: "Order expired with unfilled portion".to_string(),
+                            timestamp: crate::utils::env_block_timestamp_seconds(),
+                        });
+                        
+                        refunded_orders.push(order_id);
+                        
+                        log!("Processed refund for order {}: {} tokens", order_id, refund_amount);
+                    }
+                }
+            }
+        }
+        
+        refunded_orders
+    }
+    
+    /// Get detailed order information including fill history
+    pub fn get_order_details(&self, order_id: String) -> Option<CrossChainOrder> {
+        self.orders.get(&order_id)
+    }
+    
+    /// Get fill history for an order
+    pub fn get_fill_history(&self, order_id: String) -> Vec<crate::model::order::FillEvent> {
+        if let Some(order) = self.orders.get(&order_id) {
+            order.fill_history.clone()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Get child orders for a split order
+    pub fn get_child_orders(&self, parent_order_id: String) -> Vec<CrossChainOrder> {
+        if let Some(parent_order) = self.orders.get(&parent_order_id) {
+            let mut child_orders = Vec::new();
+            for child_id in &parent_order.child_order_ids {
+                if let Some(child_order) = self.orders.get(child_id) {
+                    child_orders.push(child_order);
+                }
+            }
+            child_orders
+        } else {
+            Vec::new()
+        }
+    }
+    
     // ========== TEE Attestation Methods ========== //
     
     /// Set or update the TEE attestation
