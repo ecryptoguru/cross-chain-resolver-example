@@ -2,6 +2,7 @@
 
 use near_sdk::{
     test_utils::VMContextBuilder,
+    testing_env,
     AccountId,
     VMContext,
 };
@@ -18,6 +19,9 @@ use k256::{
 };
 use rand_core::OsRng;
 use base64;
+
+// Import the contract
+use crate::CrossChainSolverContract;
 
 /// Helper function to create a test account ID
 pub fn account(account_id: &str) -> AccountId {
@@ -80,4 +84,17 @@ pub fn get_context() -> VMContext {
         .random_seed(vec![0, 1, 2])
         .is_view(false)
         .build()
+}
+
+/// Helper function to set up a test contract with default configuration
+pub fn setup_contract() -> CrossChainSolverContract {
+    // Set up the test context
+    let context = get_context();
+    testing_env!(context);
+    
+    // Create a test owner account
+    let owner_id = account("test.near");
+    
+    // Initialize the contract
+    CrossChainSolverContract::new(owner_id)
 }

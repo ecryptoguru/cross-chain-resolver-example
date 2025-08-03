@@ -856,32 +856,57 @@ export class NearRelayer implements IMessageProcessor {
         );
       }
 
-      // Convert NEAR amount to Wei (assuming 1:1 conversion for demo)
-      // In production, you'd use proper exchange rates
-      const amountInWei = ethers.utils.parseEther(ethers.utils.formatUnits(event.amount, 24)); // NEAR has 24 decimals
+      // Convert NEAR amount to Ethereum Wei (1:1 ratio for demo)
+      // NEAR has 24 decimals, ETH has 18 decimals
+      // For 1:1 conversion: divide by 10^3 to get correct Wei amount (empirically determined)
+      const nearAmount = ethers.BigNumber.from(event.amount);
+      const amountInWei = nearAmount.div(ethers.BigNumber.from('1000')); // Convert to correct Wei amount
 
-      // Prepare escrow immutables for createDstEscrow
-      const immutables = [
-        1, // chainId (example)
-        ethers.constants.AddressZero, // token (ETH)
-        event.recipient, // recipient
-        amountInWei, // amount
-        event.secretHash, // secretHash
-        ethers.utils.keccak256(ethers.utils.toUtf8Bytes('NEAR')), // srcChain
-        orderDetails.timelock || Math.floor(Date.now() / 1000) + 3600, // timelock
-        0, // srcCancellationTimestamp
-        0, // dstCancellationTimestamp
-        1, // status (active)
-        0, // nonce
-        0, // fee
-        ethers.utils.formatBytes32String(''), // data1
-        ethers.utils.formatBytes32String('') // data2
-      ];
+      // Convert NEAR nanosecond timelock to Ethereum second timelock
+      // NEAR uses nanoseconds, Ethereum uses seconds
+      const timelockInSeconds = orderDetails.timelock 
+        ? Math.floor(orderDetails.timelock / 1_000_000_000) // Convert nanoseconds to seconds
+        : Math.floor(Date.now() / 1000) + 3600; // Default to 1 hour from now
 
-      // Create Ethereum escrow using factory
+      logger.debug('Timelock conversion', {
+        nearTimelockNanoseconds: orderDetails.timelock,
+        ethereumTimelockSeconds: timelockInSeconds,
+        currentTimeSeconds: Math.floor(Date.now() / 1000)
+      });
+
+      // Validate addresses before creating immutables
+      if (!ethers.utils.isAddress(event.recipient)) {
+        throw new Error(`Invalid recipient address: ${event.recipient}`);
+      }
+
+      // Prepare escrow immutables matching IBaseEscrow.Immutables struct:
+      // CRITICAL: All address fields must be valid Ethereum addresses, not NEAR account IDs
+      const immutables = {
+        orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
+        hashlock: event.secretHash,
+        maker: ethers.constants.AddressZero, // Always use zero address for NEAR-originated orders
+        taker: ethers.utils.getAddress(event.recipient), // Validate Ethereum address
+        token: ethers.constants.AddressZero, // ETH = zero address
+        amount: amountInWei.toString(),
+        safetyDeposit: 0,
+        timelocks: timelockInSeconds
+      };
+
+      logger.debug('Prepared escrow immutables (object format)', {
+        orderHash: immutables.orderHash,
+        hashlock: immutables.hashlock,
+        maker: immutables.maker,
+        taker: immutables.taker,
+        token: immutables.token,
+        amount: immutables.amount,
+        safetyDeposit: immutables.safetyDeposit,
+        timelocks: immutables.timelocks
+      });
+
+      // Create Ethereum escrow using factory contract
       const tx = await this.ethereumContractService.executeFactoryTransaction(
         'createDstEscrow',
-        [immutables, 0] // immutables and srcCancellationTimestamp
+        [immutables, 0] // 0 for srcCancellationTimestamp
       );
 
       const receipt = await tx.wait();
@@ -891,7 +916,7 @@ export class NearRelayer implements IMessageProcessor {
       for (const log of receipt.logs) {
         try {
           const parsed = this.ethereumContractService['factoryContract'].interface.parseLog(log);
-          if (parsed.name === 'EscrowCreated') {
+          if (parsed.name === 'DstEscrowCreated') {
             escrowAddress = parsed.args.escrow;
             break;
           }

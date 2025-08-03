@@ -514,6 +514,30 @@ pub enum TeeAttestationError {
         expires_at: u64 
     },
     
+    /// The TEE type is not supported
+    UnsupportedTeeType {
+        /// The unsupported TEE type
+        tee_type: String,
+    },
+    
+    /// The metadata is invalid
+    InvalidMetadata {
+        /// Field that failed validation
+        field: String,
+        /// Expected value format
+        expected: String,
+        /// Actual value that caused the error
+        actual: String,
+    },
+    
+    /// The attestation has expired
+    AttestationExpired {
+        /// When the attestation expired
+        expires_at: u64,
+        /// Current timestamp when checked
+        current_timestamp: u64,
+    },
+    
     /// The attestation is not yet valid
     NotYetValid { 
         /// Current timestamp when the error occurred
@@ -1192,7 +1216,7 @@ mod tests {
     
     #[test]
     fn test_attestation_validation() {
-        let mut attestation = create_test_attestation();
+        let mut attestation = create_test_attestation(None);
         let current_timestamp = attestation.issued_at + 100;
         
         // Test valid attestation - skip signature verification since we're testing validation logic
@@ -1205,6 +1229,9 @@ mod tests {
         } else {
             panic!("Expected Expired error");
         }
+        
+        // Create a new attestation for the next test to avoid state issues
+        let mut attestation = create_test_attestation(None);
         
         // Test revoked attestation
         attestation.is_active = false;

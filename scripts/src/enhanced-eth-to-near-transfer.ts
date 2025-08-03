@@ -311,11 +311,12 @@ class CrossChainTransferTester {
   private generateSecretAndHash(): { secret: string; secretHash: string } {
     try {
       const secret = crypto.randomBytes(32).toString('hex');
-      const secretHash = ethers.keccak256(ethers.toUtf8Bytes(secret));
+      // Hash the raw bytes, not the hex string as UTF-8 (consistent with NEAR→ETH)
+      const secretHash = ethers.keccak256('0x' + secret);
 
       this.logger.info('Generated secret and hash', {
         secretLength: secret.length,
-        secretHash
+        secretHash: secretHash.substring(0, 10) + '...' // Log only first 10 chars for security
       });
 
       return { secret, secretHash };

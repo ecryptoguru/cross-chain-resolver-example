@@ -392,7 +392,7 @@ export class EthereumRelayer implements IMessageProcessor {
         methodName: 'create_swap_order',
         args: {
           recipient: nearRecipient,
-          hashlock: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(depositId)),
+          hashlock: ethers.utils.keccak256('0x' + depositId),
           timelock_duration: 86400, // 24 hours
         },
         gas: BigInt('30000000000000'), // 30 TGas
