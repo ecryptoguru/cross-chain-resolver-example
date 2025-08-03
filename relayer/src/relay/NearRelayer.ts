@@ -915,7 +915,7 @@ export class NearRelayer implements IMessageProcessor {
       const immutables = {
         orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
         hashlock: event.secretHash,
-        maker: ethers.constants.AddressZero, // zero address for NEAR-originated orders
+        maker: await this.ethereumContractService.getSignerAddress(), // Use relayer address as maker (liquidity provider)
         taker: ethers.utils.getAddress(event.recipient),
         token: ethers.constants.AddressZero, // ETH (destination token)
         amount: ethAmountWei.toString(), // ETH amount user will receive
@@ -945,11 +945,15 @@ export class NearRelayer implements IMessageProcessor {
     console.log('  ETH Value (BigNumber):', totalEthValueToSend.toString(), 'wei');
     console.log('Timelock conversion: NEAR nanoseconds', orderDetails.timelock, '-> Ethereum seconds', timelockInSeconds);
 
-    const result = await this.ethereumContractService.executeFactoryTransaction(
-      'createDstEscrow',
-      [immutables, Math.floor(Date.now() / 1000)],
-      totalEthValueToSend // Send exact BigNumber sum: safetyDeposit + amount
-    );
+    // srcCancellationTimestamp must be > (block.timestamp + timelock_offset)
+  // Use NEAR timelock + buffer to ensure it's greater than DstCancellation
+  const srcCancellationTimestamp = timelockInSeconds + 3600; // Add 1 hour buffer
+  
+  const result = await this.ethereumContractService.executeFactoryTransaction(
+    'createDstEscrow',
+    [immutables, srcCancellationTimestamp], // Use NEAR timelock + buffer as srcCancellationTimestamp
+    totalEthValueToSend // Send exact BigNumber sum: safetyDeposit + amount
+  );
 
       const receipt = await result.wait();
       // Extract escrow address from event logs

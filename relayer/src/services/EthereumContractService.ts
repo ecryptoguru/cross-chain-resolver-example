@@ -75,6 +75,22 @@ export class EthereumContractService implements IContractService {
   }
 
   /**
+   * Get the signer's address
+   */
+  async getSignerAddress(): Promise<string> {
+    try {
+      return await this.signer.getAddress();
+    } catch (error) {
+      throw new ContractError(
+        'Failed to get signer address',
+        'N/A',
+        'getSignerAddress',
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+  }
+
+  /**
    * Execute a transaction on the factory contract
    */
   async executeFactoryTransaction(
