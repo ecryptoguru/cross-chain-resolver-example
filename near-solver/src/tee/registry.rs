@@ -20,7 +20,6 @@ pub enum TeeRegistryError {
 
 
 /// TEE Registry contract state
-#[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct TeeRegistry {
     /// Contract owner (admin)
@@ -35,10 +34,8 @@ pub struct TeeRegistry {
     pub owner_attestations: LookupMap<AccountId, UnorderedSet<String>>,
 }
 
-#[near_bindgen]
 impl TeeRegistry {
     /// Initialize a new TEE Registry
-    #[init]
     pub fn new(owner_id: AccountId) -> Self {
         // Clone owner_id to avoid move issues
         let owner_id_clone = owner_id.clone();
@@ -57,7 +54,7 @@ impl TeeRegistry {
     // ===== Admin Functions =====
 
     /// Pause the registry (admin only)
-    #[payable]
+
     pub fn pause(&mut self) {
         self.assert_not_paused();
         // Only owner can pause/unpause
@@ -75,7 +72,7 @@ impl TeeRegistry {
     }
 
     /// Unpause the registry (admin only)
-    #[payable]
+
     pub fn unpause(&mut self) {
         require!(self.paused, "Registry is not paused");
         // Only owner can pause/unpause
@@ -95,7 +92,7 @@ impl TeeRegistry {
     // ===== Public Functions =====
 
     /// Registers a new TEE attestation
-    #[handle_result]
+
     pub fn register_attestation(
         &mut self,
         tee_type: TeeType,
@@ -155,7 +152,7 @@ impl TeeRegistry {
     }
 
     /// Revoke an existing TEE attestation
-    #[payable]
+
     pub fn revoke_attestation(&mut self, public_key: String) {
         self.assert_not_paused();
         
@@ -194,7 +191,7 @@ impl TeeRegistry {
     }
 
     /// Extend the expiration of an attestation
-    #[payable]
+
     pub fn extend_attestation(
         &mut self,
         public_key: String,

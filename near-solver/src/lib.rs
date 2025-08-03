@@ -13,6 +13,20 @@ pub mod service;
 pub mod tee;
 pub mod utils;
 
+// Test utilities module - only available in test mode
+#[cfg(test)]
+mod test_utils;
+
+// Re-export test_utils for integration tests
+#[cfg(test)]
+pub use test_utils::*;
+
+// Make test_utils available for integration tests
+#[cfg(test)]
+pub mod test_utils_export {
+    pub use super::test_utils::*;
+}
+
 use crate::{
     event::ContractEvent,
     model::order::{CrossChainOrder, OrderStatus},
@@ -199,9 +213,8 @@ impl CrossChainSolverContract {
             public_key,
             report,
             signature,
-            expires_in_seconds,
             env::signer_account_id(),
-            "1.0.0".to_string(),
+            expires_in_seconds,
             Some(HashMap::new())
         );
         
@@ -287,6 +300,7 @@ impl CrossChainSolverContract {
 // Tests
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
     use near_sdk::test_utils::{accounts, VMContextBuilder};
     use near_sdk::testing_env;
