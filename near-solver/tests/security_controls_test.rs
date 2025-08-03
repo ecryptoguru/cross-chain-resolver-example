@@ -1,49 +1,43 @@
-use near_sdk::{
-    test_utils::VMContextBuilder,
-    testing_env,
-    AccountId,
-    env,
-    VMContext
-};
+use near_sdk::test_utils::VMContextBuilder;
+use near_sdk::testing_env;
+use std::collections::HashMap;
 
-use near_solver::{
-    tee::{
-        registry_impl::TeeAttestationRegistry,
-        TeeAttestation,
-        TeeType,
-        TeeAttestationError,
-    },
-    *
-};
+// Import the contract code
+use near_solver::tee::attestation::TeeAttestation;
+use near_solver::tee::registry::TeeAttestationRegistry;
+use near_solver::tee::types::TeeType;
+use near_sdk::AccountId;
+use near_sdk::json_types::U128;
+use near_sdk::serde_json::json;
+
+// Import test utilities
+use near_solver::test_utils_export::*;
 
 // Helper to set up a test contract instance
 fn setup_contract() -> TeeAttestationRegistry {
+    let alice: AccountId = "alice.near".parse().unwrap();
+    let bob: AccountId = "bob.near".parse().unwrap();
+    let admin: AccountId = "admin.near".parse().unwrap();
+    
     let context = VMContextBuilder::new()
-        .current_account_id(AccountId::new_unvalidated("contract.near".to_string()))
-        .signer_account_id(AccountId::new_unvalidated("admin.near".to_string()))
+        .current_account_id(alice)
+        .signer_account_id(bob)
         .is_view(false)
         .build();
     testing_env!(context);
     
     // Create registry with admin account
-    let admin = AccountId::new_unvalidated("admin.near".to_string());
     TeeAttestationRegistry::new(admin)
 }
-
-use std::collections::HashMap;
-
-// Import test utilities
-use crate::test_utils::account;
-
-mod test_utils;
 
 /// Test access control for admin-only functions
 #[test]
 fn test_admin_access_control() {
     // Setup test environment
+    let alice: AccountId = "alice.near".parse().unwrap();
     let context = VMContextBuilder::new()
-        .signer_account_id(account("user.near"))
-        .is_view(false)
+        .predecessor_account_id(alice.clone())
+        .attached_deposit(1)
         .build();
     testing_env!(context);
     
@@ -62,15 +56,15 @@ fn test_input_validation() {
         "".to_string(),  // Empty public key
         "test_report".to_string(),
         "test_signature".to_string(),
-        AccountId::new_unvalidated("test.near".to_string()),
+        AccountId::new_unchecked("test.near".to_string()),
         3600,
         None,
     );
     
-    assert!(matches!(
-        result,
-        Err(TeeAttestationError::InvalidReport { .. })
-    ));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "InvalidReport { error: \"Public key is empty\" }"
+    );
     
     // Test empty report
     let result = TeeAttestation::new(
@@ -78,47 +72,49 @@ fn test_input_validation() {
         "test_key".to_string(),
         "".to_string(),  // Empty report
         "test_signature".to_string(),
-        AccountId::new_unvalidated("test.near".to_string()),
+        AccountId::new_unchecked("test.near".to_string()),
         3600,
         None,
     );
     
-    assert!(matches!(
-        result,
-        Err(TeeAttestationError::InvalidReport { .. })
-    ));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "InvalidReport { error: \"Report is empty\" }"
+    );
     
     // Test empty signature
     let result = TeeAttestation::new(
-        TeeType::Sgx,
         "test_key".to_string(),
         "test_report".to_string(),
-        "".to_string(),  // Empty signature
-        AccountId::new_unvalidated("test.near".to_string()),
-        3600,
+        "".to_string(),
+        TeeType::Sgx,
+        12345,
+        None,
+        None,
         None,
     );
     
-    assert!(matches!(
-        result,
-        Err(TeeAttestationError::InvalidSignature { .. })
-    ));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "InvalidSignature { error: \"Signature is empty\" }"
+    );
     
     // Test zero expiration
     let result = TeeAttestation::new(
-        TeeType::Sgx,
         "test_key".to_string(),
         "test_report".to_string(),
         "test_signature".to_string(),
-        AccountId::new_unvalidated("test.near".to_string()),
-        0,  // Zero expiration
+        TeeType::Sgx,
+        0,
+        None,
+        None,
         None,
     );
     
-    assert!(matches!(
-        result,
-        Err(TeeAttestationError::InvalidExpiration { .. })
-    ));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "InvalidExpiration { error: \"Expiration is zero\" }"
+    );
 }
 
 /// Test event emission for important state changes
@@ -141,23 +137,22 @@ fn test_error_handling() {
     let mut contract = setup_contract();
     
     // Test unsupported TEE type
+    let unsupported_tee = TeeType::Other("unsupported".to_string());
     let result = contract.register_attestation(
-        "public_key".to_string(),
-        TeeType::Other("invalid".to_string()),
+        "pubkey".to_string(),
+        unsupported_tee,
         "report".to_string(),
         "signature".to_string(),
+        "owner.near".parse().unwrap(),
         3600,
+        None,
         None,
     );
     
-    // Check for UnsupportedTeeType variant
-    match result {
-        Ok(_) => panic!("Expected UnsupportedTeeType error"),
-        Err(e) => match e {
-            TeeAttestationError::UnsupportedTeeType { .. } => { /* Expected */ }
-            _ => panic!("Expected UnsupportedTeeType error, got {:?}", e),
-        }
-    }
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "UnsupportedTeeType { tee_type: \"UNSUPPORTED\" }"
+    );
     
     // Test SGX attestation with missing metadata
     let result = contract.register_attestation(

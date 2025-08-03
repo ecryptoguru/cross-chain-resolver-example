@@ -11,6 +11,7 @@ import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { DynamicAuctionService, CrossChainAuctionParams } from '../services/DynamicAuctionService.js';
 
 export interface EthereumRelayerConfig {
   provider: ethers.providers.JsonRpcProvider;
@@ -28,6 +29,8 @@ export class EthereumRelayer implements IMessageProcessor {
   private readonly contractService: EthereumContractService;
   private readonly validator: ValidationService;
   private readonly storage: StorageService;
+  private readonly auctionService: DynamicAuctionService;
+  private processedMessages: Set<string> = new Set();
   private isRunning = false;
 
   constructor(config: EthereumRelayerConfig) {
@@ -39,6 +42,7 @@ export class EthereumRelayer implements IMessageProcessor {
     // Then validate config
     this.validateConfig(config);
     this.storage = new StorageService(config.storageDir, 'ethereum_processed_messages.json');
+    this.auctionService = new DynamicAuctionService();
     this.contractService = new EthereumContractService(
       config.provider,
       config.signer,
@@ -395,20 +399,34 @@ export class EthereumRelayer implements IMessageProcessor {
       this.validator.validateNearAccountId(nearRecipient);
       this.validator.validateAmount(ethAmount);
 
-      // ETH→NEAR Cross-chain transfer: Relayer provides NEAR liquidity
-      // User locked ETH tokens, relayer provides equivalent NEAR
-      // Exchange rate: 1 ETH = 1000 NEAR (demo rate)
+      // ETH→NEAR Cross-chain transfer: Dynamic auction pricing
+      // User locked ETH tokens, relayer provides NEAR liquidity based on auction
       const ethAmountWei = ethers.BigNumber.from(ethAmount);
       
-      // Convert ETH to NEAR using exchange rate
-      // 1 ETH = 10^18 wei, 1 NEAR = 10^24 yoctoNEAR
-      // Exchange rate: 1 ETH = 1000 NEAR, so 1 wei = 1000 yoctoNEAR * 10^6
-      const nearAmountYocto = ethAmountWei.mul(ethers.BigNumber.from('1000000000000')); // 1:1000 exchange rate
+      // Create auction parameters
+      const auctionParams: CrossChainAuctionParams = {
+        fromChain: 'ETH',
+        toChain: 'NEAR',
+        fromAmount: ethAmount,
+        baseExchangeRate: 1000, // Base rate: 1 ETH = 1000 NEAR
+        startTime: Math.floor(Date.now() / 1000),
+        orderId: orderId
+      };
       
-      logger.info('ETH→NEAR cross-chain transfer calculation', {
+      // Calculate current auction rate and amounts
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams);
+      const nearAmountYocto = ethers.BigNumber.from(auctionResult.outputAmount);
+      const feeAmount = ethers.BigNumber.from(auctionResult.feeAmount);
+      const totalNearValue = ethers.BigNumber.from(auctionResult.totalCost);
+      
+      logger.info('Dynamic auction pricing applied for ETH→NEAR', {
         ethAmount: ethers.utils.formatEther(ethAmountWei),
+        currentRate: auctionResult.currentRate,
         nearAmount: ethers.utils.formatUnits(nearAmountYocto, 24),
-        exchangeRate: '1 ETH = 1000 NEAR'
+        feeAmount: ethers.utils.formatUnits(feeAmount, 24),
+        totalCost: ethers.utils.formatUnits(totalNearValue, 24),
+        timeRemaining: auctionResult.timeRemaining,
+        orderId: orderId
       });
 
       // Call NEAR contract to create escrow with relayer's NEAR liquidity

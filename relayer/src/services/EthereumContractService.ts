@@ -95,7 +95,9 @@ export class EthereumContractService implements IContractService {
       const factoryWithSigner = this.factoryContract.connect(this.signer);
       
       // Prepare transaction options
-      const txOptions: any = {};
+      const txOptions: any = {
+        gasLimit: 800000 // Manual gas limit to bypass estimation issues
+      };
       if (value && value.gt(0)) {
         txOptions.value = value;
         logger.info('Sending ETH value with transaction', {
@@ -104,6 +106,11 @@ export class EthereumContractService implements IContractService {
         });
       }
       
+      logger.info('Using manual gas limit to bypass estimation', {
+        method,
+        gasLimit: txOptions.gasLimit
+      });
+
       // Execute the transaction
       const tx = await factoryWithSigner[method](...params, txOptions);
       

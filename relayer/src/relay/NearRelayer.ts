@@ -8,6 +8,7 @@ import { NearAccount, IMessageProcessor, CrossChainMessage, MessageType } from '
 import { NearEventListener, NearEventHandlers, SwapOrderCreatedEvent, SwapOrderCompletedEvent, SwapOrderRefundedEvent, TransactionProcessedEvent } from '../services/NearEventListener.js';
 import { NearContractService } from '../services/NearContractService.js';
 import { EthereumContractService } from '../services/EthereumContractService.js';
+import { DynamicAuctionService, CrossChainAuctionParams } from '../services/DynamicAuctionService.js';
 import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
@@ -15,8 +16,10 @@ import { logger } from '../utils/logger.js';
 
 export interface NearRelayerConfig {
   nearAccount: NearAccount;
-  ethereumSigner: ethers.Signer;
-  ethereumProvider: ethers.providers.JsonRpcProvider;
+  ethereum: {
+    rpcUrl: string;
+    privateKey: string;
+  };
   ethereumEscrowFactoryAddress: string;
   escrowContractId: string;
   pollIntervalMs?: number;
@@ -28,28 +31,33 @@ export class NearRelayer implements IMessageProcessor {
   private readonly eventListener: NearEventListener;
   private readonly contractService: NearContractService;
   private readonly ethereumContractService: EthereumContractService;
-  private readonly validator: ValidationService;
+  private readonly auctionService: DynamicAuctionService;
   private readonly storage: StorageService;
+  private readonly validator: ValidationService;
+  private processedMessages: Set<string> = new Set();
   private isRunning = false;
 
   constructor(config: NearRelayerConfig) {
     this.config = config;
 
     // Initialize services first
+    this.storage = new StorageService(config.storageDir, 'near_processed_messages.json');
     this.validator = new ValidationService();
     
-    // Then validate config
+    // Validate config
     this.validateConfig(config);
-    this.storage = new StorageService(config.storageDir, 'near_processed_messages.json');
     this.contractService = new NearContractService(
       config.nearAccount,
       config.escrowContractId
     );
+    const ethereumProvider = new ethers.providers.JsonRpcProvider(config.ethereum.rpcUrl);
+    const ethereumSigner = new ethers.Wallet(config.ethereum.privateKey, ethereumProvider);
     this.ethereumContractService = new EthereumContractService(
-      config.ethereumProvider,
-      config.ethereumSigner,
+      ethereumProvider,
+      ethereumSigner,
       config.ethereumEscrowFactoryAddress
     );
+    this.auctionService = new DynamicAuctionService();
 
     // Set up event handlers
     const eventHandlers: NearEventHandlers = {
@@ -856,15 +864,35 @@ export class NearRelayer implements IMessageProcessor {
         );
       }
 
-      // NEAR→ETH Cross-chain transfer: Relayer provides ETH liquidity
-      // User locked NEAR tokens, relayer provides equivalent ETH
-      // Exchange rate: 1 NEAR = 0.001 ETH (demo rate)
+      // NEAR→ETH Cross-chain transfer: Dynamic auction pricing
+      // User locked NEAR tokens, relayer provides ETH liquidity based on auction
       const nearAmount = ethers.BigNumber.from(event.amount); // NEAR amount in yoctoNEAR (24 decimals)
       
-      // Convert NEAR to ETH using exchange rate
-      // 1 NEAR = 10^24 yoctoNEAR, 1 ETH = 10^18 wei
-      // Exchange rate: 1 NEAR = 0.001 ETH, so 1 yoctoNEAR = 0.001 wei / 10^6
-      const ethAmountWei = nearAmount.div(ethers.BigNumber.from('1000000')); // 1:0.001 exchange rate
+      // Create auction parameters
+      const auctionParams: CrossChainAuctionParams = {
+        fromChain: 'NEAR',
+        toChain: 'ETH',
+        fromAmount: event.amount,
+        baseExchangeRate: 0.001, // Base rate: 1 NEAR = 0.001 ETH
+        startTime: Math.floor(Date.now() / 1000),
+        orderId: event.orderId
+      };
+      
+      // Calculate current auction rate and amounts
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams);
+      const ethAmountWei = ethers.BigNumber.from(auctionResult.outputAmount);
+      const feeAmount = ethers.BigNumber.from(auctionResult.feeAmount);
+      const totalEthValue = ethers.BigNumber.from(auctionResult.totalCost);
+      
+      logger.info('Dynamic auction pricing applied', {
+        orderId: event.orderId,
+        nearAmount: ethers.utils.formatUnits(nearAmount, 24),
+        currentRate: auctionResult.currentRate,
+        ethAmount: ethers.utils.formatEther(ethAmountWei),
+        feeAmount: ethers.utils.formatEther(feeAmount),
+        totalCost: ethers.utils.formatEther(totalEthValue),
+        timeRemaining: auctionResult.timeRemaining
+      });
 
       // Convert NEAR nanosecond timelock to Ethereum second timelock
       // NEAR uses nanoseconds, Ethereum uses seconds
@@ -883,10 +911,6 @@ export class NearRelayer implements IMessageProcessor {
         throw new Error(`Invalid recipient address: ${event.recipient}`);
       }
 
-      // Safety deposit for cross-chain transfer (covers gas + security)
-      // Using 50% of ETH amount that user will receive
-      const safetyDepositAmount = ethAmountWei.div(2); // 50% safety deposit
-      
       // Prepare escrow immutables matching IBaseEscrow.Immutables struct:
       const immutables = {
         orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
@@ -895,35 +919,37 @@ export class NearRelayer implements IMessageProcessor {
         taker: ethers.utils.getAddress(event.recipient),
         token: ethers.constants.AddressZero, // ETH (destination token)
         amount: ethAmountWei.toString(), // ETH amount user will receive
-        safetyDeposit: safetyDepositAmount.toString(),
+        safetyDeposit: feeAmount.toString(), // Use auction fee as safety deposit
         timelocks: timelockInSeconds
       };
 
       // Calculate total ETH value relayer must provide: safetyDeposit + ETH amount
-      const totalEthValue = ethAmountWei.add(safetyDepositAmount);
-      
-      console.log('Creating Ethereum escrow with immutables:', {
-        orderHash: immutables.orderHash,
-        hashlock: immutables.hashlock,
-        maker: immutables.maker,
-        taker: immutables.taker,
-        token: immutables.token,
-        amount: immutables.amount,
-        safetyDeposit: immutables.safetyDeposit,
-        timelocks: immutables.timelocks
-      });
-      console.log('Cross-chain transfer calculation:');
-      console.log('  NEAR Amount:', ethers.utils.formatUnits(nearAmount, 24), 'NEAR');
-      console.log('  ETH Amount (exchange rate):', ethers.utils.formatEther(ethAmountWei), 'ETH');
-      console.log('  Safety Deposit:', ethers.utils.formatEther(safetyDepositAmount), 'ETH');
-      console.log('  Total ETH Provided by Relayer:', ethers.utils.formatEther(totalEthValue), 'ETH');
-      console.log('Timelock conversion: NEAR nanoseconds', orderDetails.timelock, '-> Ethereum seconds', timelockInSeconds);
+    // CRITICAL: Use BigNumber arithmetic to match contract validation exactly
+    const totalEthValueToSend = ethAmountWei.add(feeAmount);
+    
+    console.log('Creating Ethereum escrow with immutables:', {
+      orderHash: immutables.orderHash,
+      hashlock: immutables.hashlock,
+      maker: immutables.maker,
+      taker: immutables.taker,
+      token: immutables.token,
+      amount: immutables.amount,
+      safetyDeposit: immutables.safetyDeposit,
+      timelocks: immutables.timelocks
+    });
+    console.log('Cross-chain transfer calculation:');
+    console.log('  NEAR Amount:', ethers.utils.formatUnits(nearAmount, 24), 'NEAR');
+    console.log('  ETH Amount (exchange rate):', ethers.utils.formatEther(ethAmountWei), 'ETH');
+    console.log('  Safety Deposit:', ethers.utils.formatEther(feeAmount), 'ETH');
+    console.log('  Total ETH Provided by Relayer:', ethers.utils.formatEther(totalEthValueToSend), 'ETH');
+    console.log('  ETH Value (BigNumber):', totalEthValueToSend.toString(), 'wei');
+    console.log('Timelock conversion: NEAR nanoseconds', orderDetails.timelock, '-> Ethereum seconds', timelockInSeconds);
 
-      const result = await this.ethereumContractService.executeFactoryTransaction(
-        'createDstEscrow',
-        [immutables, Math.floor(Date.now() / 1000)],
-        totalEthValue // Send ETH value = safetyDeposit + amount
-      );
+    const result = await this.ethereumContractService.executeFactoryTransaction(
+      'createDstEscrow',
+      [immutables, Math.floor(Date.now() / 1000)],
+      totalEthValueToSend // Send exact BigNumber sum: safetyDeposit + amount
+    );
 
       const receipt = await result.wait();
       // Extract escrow address from event logs
@@ -1113,12 +1139,12 @@ export class NearRelayer implements IMessageProcessor {
       throw ErrorHandler.createValidationError('config.nearAccount', config.nearAccount, 'NEAR account is required');
     }
 
-    if (!config.ethereumSigner) {
-      throw ErrorHandler.createValidationError('config.ethereumSigner', config.ethereumSigner, 'Ethereum signer is required');
+    if (!config.ethereum?.rpcUrl) {
+      throw ErrorHandler.createValidationError('config.ethereum.rpcUrl', config.ethereum?.rpcUrl, 'Ethereum RPC URL is required');
     }
 
-    if (!config.ethereumProvider) {
-      throw ErrorHandler.createValidationError('config.ethereumProvider', config.ethereumProvider, 'Ethereum provider is required');
+    if (!config.ethereum?.privateKey) {
+      throw ErrorHandler.createValidationError('config.ethereum.privateKey', config.ethereum?.privateKey, 'Ethereum private key is required');
     }
 
     this.validator.validateEthereumAddress(config.ethereumEscrowFactoryAddress);

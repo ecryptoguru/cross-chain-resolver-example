@@ -694,7 +694,7 @@ async function main(): Promise<void> {
       nearPrivateKey: process.env.NEAR_PRIVATE_KEY!,
       nearEscrowContractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
       ethRecipient: process.env.ETH_RECIPIENT!,
-      transferAmount: process.env.TRANSFER_AMOUNT!,
+      transferAmount: process.env.NEAR_TRANSFER_AMOUNT!,
       timelock: parseInt(process.env.TIMELOCK_DURATION!) || 3600,
       logLevel: process.env.LOG_LEVEL || 'info'
     };

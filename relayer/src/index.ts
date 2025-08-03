@@ -75,8 +75,10 @@ async function main() {
     
     const nearRelayer = new NearRelayer({
       nearAccount: nearAccount as any,
-      ethereumProvider: ethereumSigner.provider as ethers.providers.JsonRpcProvider,
-      ethereumSigner: ethereumSigner,
+      ethereum: {
+        rpcUrl: process.env.ETHEREUM_RPC_URL!,
+        privateKey: process.env.ETHEREUM_PRIVATE_KEY!
+      },
       escrowContractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
       ethereumEscrowFactoryAddress: process.env.ETHEREUM_ESCROW_FACTORY_ADDRESS!,
       storageDir: process.env.STORAGE_DIR || './storage',

@@ -135,5 +135,4 @@ cache
 
 package-lock.json
 
-CONFIGURATION_GUIDE.md
-RELAYER_ARCHITECTURE.md
+config/config.test.json
