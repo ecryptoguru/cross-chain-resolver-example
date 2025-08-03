@@ -2,10 +2,12 @@
 
 import { ethers } from 'ethers';
 import * as crypto from 'crypto';
+import * as path from 'path';
 import dotenv from 'dotenv';
 import { createLogger, format, transports, Logger } from 'winston';
 
-dotenv.config();
+// Load .env from project root
+dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 // Enhanced error classes
 class CrossChainTestError extends Error {
