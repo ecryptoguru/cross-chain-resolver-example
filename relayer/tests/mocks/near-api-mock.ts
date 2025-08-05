@@ -2,8 +2,10 @@
  * Mock implementation for NEAR API
  */
 
-export const mockNearAccount = {
-  accountId: 'test.near',
+// Create a mock NEAR account with all required methods
+export const createMockNearAccount = (accountId: string) => {
+  const mockAccount = {
+    accountId,
   connection: {
     provider: {
       query: jest.fn().mockResolvedValue({
@@ -26,11 +28,22 @@ export const mockNearAccount = {
     total: '1000000000000000000000000',
     available: '1000000000000000000000000'
   }),
-  state: jest.fn().mockResolvedValue({
-    amount: '1000000000000000000000000',
-    code_hash: 'hash123'
-  })
+    state: jest.fn().mockResolvedValue({
+      amount: '1000000000000000000000000',
+      code_hash: 'hash123'
+    }),
+    
+    // Additional mock methods needed for testing
+    setMockError: jest.fn(),
+    setMockFunctionCallResult: jest.fn(),
+    setMockViewFunctionResult: jest.fn()
+  };
+  
+  return mockAccount;
 };
+
+// Default export for backward compatibility
+export const mockNearAccount = createMockNearAccount('test.near');
 
 export const mockNearConnection = {
   provider: {

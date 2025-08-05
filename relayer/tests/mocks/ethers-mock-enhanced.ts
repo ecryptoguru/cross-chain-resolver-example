@@ -90,8 +90,19 @@ export class MockJsonRpcSigner {
 export class MockProvider extends providers.JsonRpcProvider {
   private _blockNumber = 12345678;
   private _signer: MockJsonRpcSigner;
+  private _mockError: Error | null = null;
+  private _mockEscrow: any = null;
   public _isProvider = true;
   public _network: providers.Network;
+
+  // Mock methods for testing
+  public setMockError(error: Error | null) {
+    this._mockError = error;
+  }
+
+  public setMockEscrow(escrow: any) {
+    this._mockEscrow = escrow;
+  }
 
   public static create(): MockProvider {
     return new MockProvider();
