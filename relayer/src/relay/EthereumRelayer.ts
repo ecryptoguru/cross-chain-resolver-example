@@ -357,26 +357,86 @@ export class EthereumRelayer implements IMessageProcessor {
 
   private async processDepositMessage(message: DepositMessage): Promise<void> {
     try {
-      logger.info('Processing deposit message', {
+      logger.info('Processing deposit message', { 
         messageId: message.messageId,
-        sender: message.sender,
-        recipient: message.recipient,
+        depositId: message.data.txHash,
+        fromChain: message.sourceChain,
+        toChain: message.destChain,
         amount: message.amount
       });
 
-      // Create escrow on Ethereum side
-      // Implementation depends on specific bridge contract
-      // This is a placeholder for the actual implementation
+      // Validate required fields
+      if (!message.data.secretHash) {
+        throw new Error('Missing required field: secretHash');
+      }
+
+      // Calculate auction parameters using DynamicAuctionService
+      const auctionParams = {
+        fromChain: 'NEAR' as const,
+        toChain: 'ETH' as const,
+        fromAmount: message.amount,
+        baseExchangeRate: await this.getExchangeRate('NEAR', 'ETH'),
+        startTime: Math.floor(Date.now() / 1000),
+        orderId: message.data.txHash
+      };
+
+      // Get current auction rate and output amount
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams);
       
-      logger.info('Deposit message processed successfully', {
-        messageId: message.messageId
-      });
-    } catch (error) {
-      throw ErrorHandler.handleAndRethrow(
-        error as Error,
-        'Failed to process deposit message',
-        { messageId: message.messageId }
+      // Create escrow on Ethereum
+      const escrowTx = await this.contractService.executeFactoryTransaction(
+        'createEscrow',
+        [
+          message.recipient,  // recipient
+          message.data.secretHash, // hashlock
+          message.data.timelock,   // timelock (already in seconds)
+          11155111 // chainId (Sepolia testnet)
+        ],
+        ethers.utils.parseEther(auctionResult.totalCost)
       );
+
+      // Wait for transaction confirmation
+      const receipt = await escrowTx.wait();
+      
+      // Extract escrow address from event logs
+      const escrowCreatedEvent = receipt.events?.find(
+        (e: any) => e.event === 'EscrowCreated'
+      );
+      
+      if (!escrowCreatedEvent) {
+        throw new Error('EscrowCreated event not found in transaction receipt');
+      }
+
+      const escrowAddress = escrowCreatedEvent.args?.escrowAddress;
+      
+      // Update order status
+      await this.updateOrderStatus(message.data.txHash, 'escrow_created', {
+        escrowAddress,
+        transactionHash: receipt.transactionHash,
+        timestamp: new Date().toISOString()
+      });
+
+      logger.info('Successfully processed deposit message', {
+        messageId: message.messageId,
+        escrowAddress,
+        transactionHash: receipt.transactionHash
+      });
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to process deposit message', {
+        messageId: message.messageId,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      // Update order status with error
+      await this.updateOrderStatus(message.data.txHash, 'error', {
+        error: errorMessage,
+        timestamp: new Date().toISOString()
+      });
+
+      throw error;
     }
   }
 
@@ -883,5 +943,49 @@ export class EthereumRelayer implements IMessageProcessor {
 
     this.validator.validateEthereumAddress(config.factoryAddress);
     this.validator.validateEthereumAddress(config.bridgeAddress);
+  }
+
+  /**
+   * Get exchange rate between two chains
+   * This is a placeholder implementation - in production, this would
+   * integrate with price oracles or exchange rate APIs
+   */
+  private async getExchangeRate(fromChain: string, toChain: string): Promise<number> {
+    try {
+      logger.debug('Getting exchange rate', { fromChain, toChain });
+      
+      // Hardcoded exchange rates for testing
+      // In production, this would fetch from oracles like Chainlink, Band Protocol, etc.
+      const exchangeRates: Record<string, Record<string, number>> = {
+        'NEAR': {
+          'ETH': 0.001, // 1 NEAR = 0.001 ETH (approximate)
+          'USD': 2.5    // 1 NEAR = $2.5 (approximate)
+        },
+        'ETH': {
+          'NEAR': 1000, // 1 ETH = 1000 NEAR (approximate)
+          'USD': 2500   // 1 ETH = $2500 (approximate)
+        }
+      };
+      
+      const rate = exchangeRates[fromChain]?.[toChain];
+      
+      if (!rate) {
+        logger.warn('Exchange rate not found, using default', { fromChain, toChain });
+        return 1; // Default 1:1 rate
+      }
+      
+      logger.debug('Exchange rate retrieved', { fromChain, toChain, rate });
+      return rate;
+      
+    } catch (error) {
+      logger.error('Failed to get exchange rate', {
+        fromChain,
+        toChain,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      // Return default rate on error
+      return 1;
+    }
   }
 }

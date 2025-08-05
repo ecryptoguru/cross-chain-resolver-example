@@ -213,6 +213,15 @@ export interface NearAccount {
   }): Promise<any>;
 }
 
+// Escrow search parameters
+export interface EscrowSearchParams {
+  initiator?: string;
+  amount?: string;
+  secretHash?: string;
+  maxBlocksToSearch?: number;
+  maxEscrowsToCheck?: number;
+}
+
 // Partial fill interfaces
 export interface PartialFillParams {
   orderId: string;

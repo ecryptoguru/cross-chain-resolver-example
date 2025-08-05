@@ -635,10 +635,10 @@ class CrossChainTransferTester {
 function loadTestConfiguration(): TestConfig {
   try {
     const config = {
-      ethereumRpcUrl: process.env.ETHEREUM_RPC_URL || process.env.SEPOLIA_RPC_URL,
+      ethereumRpcUrl: process.env.SEPOLIA_RPC_URL,
       privateKey: process.env.PRIVATE_KEY,
-      nearBridgeAddress: process.env.NEAR_BRIDGE || process.env.RESOLVER_ADDRESS,
-      transferAmount: process.env.ETH_TRANSFER_AMOUNT || '0.01',
+      nearBridgeAddress: process.env.NEAR_BRIDGE,
+      transferAmount: process.env.ETH_TRANSFER_AMOUNT || '0.001',
       timelock: parseInt(process.env.TIMELOCK_DURATION || '3600'),
       recipient: process.env.RECIPIENT || 'fusionswap.testnet',
       logLevel: process.env.LOG_LEVEL || 'info'

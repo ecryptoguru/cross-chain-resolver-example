@@ -711,50 +711,13 @@ export class NearRelayer implements IMessageProcessor {
 
   /**
    * Find secret in order completion history
+   * @deprecated Moved to complete implementation below
    */
-  private async findSecretInOrderHistory(orderId: string): Promise<string | null> {
-    try {
-      // This would query the NEAR contract for historical data about the order
-      // For now, return null as this would require additional contract methods
-      logger.debug('Searching order history for secret', { orderId });
-      
-      // TODO: Implement contract method to get order completion details including secret
-      // This might involve calling a view method like get_order_completion_details(order_id)
-      
-      return null;
-    } catch (error) {
-      logger.error('Failed to find secret in order history', {
-        orderId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    }
-  }
-
+  
   /**
    * Find recent completion event for the given order
+   * @deprecated Moved to complete implementation below
    */
-  private async findRecentCompletionEvent(orderId: string): Promise<SwapOrderCompletedEvent | null> {
-    try {
-      // This would typically involve querying recent blocks for events
-      // For now, return null as this requires integration with the event listener
-      logger.debug('Searching for recent completion event', { orderId });
-      
-      // TODO: Implement event querying logic
-      // This could involve:
-      // 1. Querying recent blocks
-      // 2. Parsing transaction receipts for events
-      // 3. Filtering for SwapOrderCompleted events with matching order ID
-      
-      return null;
-    } catch (error) {
-      logger.error('Failed to find recent completion event', {
-        orderId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    }
-  }
 
   /**
    * Parse a specific transaction for secret revelation
@@ -1225,6 +1188,105 @@ export class NearRelayer implements IMessageProcessor {
         initiator,
         error: error instanceof Error ? error.message : String(error)
       });
+      return null;
+    }
+  }
+
+  /**
+   * Find a recent completion event for the given order ID
+   * @param orderId The order ID to search for
+   * @returns The most recent SwapOrderCompletedEvent or null if not found
+   */
+  private async findRecentCompletionEvent(orderId: string): Promise<SwapOrderCompletedEvent | null> {
+    try {
+      logger.debug('Searching for recent completion event', { orderId });
+      
+      // Get the escrow details which contains the completion status
+      const escrowDetails = await this.contractService.getEscrowDetails(orderId);
+      
+      if (!escrowDetails) {
+        logger.debug('No escrow found for order', { orderId });
+        return null;
+      }
+
+      // If the escrow is completed, return a completion event
+      if (escrowDetails.status === 'completed') {
+        const completionEvent: SwapOrderCompletedEvent = {
+          orderId,
+          secret: escrowDetails.secret || '',
+          blockHeight: escrowDetails.completed_at ? Math.floor(escrowDetails.completed_at / 1_000_000) : 0, // Convert to block height approximation
+          transactionHash: '' // Will be set by the event listener
+        };
+        
+        logger.debug('Found completed escrow', { 
+          orderId,
+          hasSecret: !!escrowDetails.secret
+        });
+        
+        return completionEvent;
+      }
+
+      logger.debug('No completion found for order', { orderId, status: escrowDetails.status });
+      return null;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      ErrorHandler.handle(new Error(`NearRelayer.findRecentCompletionEvent failed for order ${orderId}: ${errorMessage}`));
+      return null;
+    }
+  }
+
+  /**
+   * Find a secret in order history by querying escrow details
+   * @param orderId The order ID to search for
+   * @returns The secret string or null if not found
+   */
+  private async findSecretInOrderHistory(orderId: string): Promise<string | null> {
+    try {
+      logger.debug('Searching for secret in order history', { orderId });
+      
+      // First try to get the escrow details which may contain the secret
+      const escrowDetails = await this.contractService.getEscrowDetails(orderId);
+      
+      if (escrowDetails?.secret) {
+        logger.debug('Found secret in escrow details', { 
+          orderId,
+          hasSecret: true
+        });
+        return escrowDetails.secret;
+      }
+
+      // If no secret in escrow details, try to find a completion event
+      const completionEvent = await this.findRecentCompletionEvent(orderId);
+      if (completionEvent?.secret) {
+        logger.debug('Found secret in completion event', { 
+          orderId,
+          hasSecret: true
+        });
+        return completionEvent.secret;
+      }
+
+      // As a last resort, try to extract from transaction logs
+      try {
+        const secret = await this.extractSecretFromTransactionLogs(orderId);
+        if (secret) {
+          logger.debug('Extracted secret from transaction logs', { 
+            orderId,
+            hasSecret: true
+          });
+          return secret;
+        }
+      } catch (logError) {
+        logger.warn('Failed to extract secret from transaction logs', { 
+          orderId,
+          error: logError instanceof Error ? logError.message : String(logError)
+        });
+      }
+
+      logger.warn('Secret not found in order history', { orderId });
+      return null;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      ErrorHandler.handle(new Error(`NearRelayer.findSecretInOrderHistory failed for order ${orderId}: ${errorMessage}`));
       return null;
     }
   }
