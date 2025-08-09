@@ -1,4 +1,5 @@
 import { ethers, providers, BigNumber, Signer, Contract, ContractInterface, BigNumberish } from 'ethers';
+import { jest } from '@jest/globals';
 
 // Extend the TransactionResponse interface to include the wait method
 interface TransactionResponse extends providers.TransactionResponse {
@@ -24,7 +25,7 @@ export class MockJsonRpcSigner {
   }
 
   async getAddress(): Promise<string> {
-    return '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+    return this._address;
   }
 
   async signMessage(_message: string): Promise<string> {
@@ -32,12 +33,31 @@ export class MockJsonRpcSigner {
   }
 
   async sendTransaction(_transaction: any): Promise<any> {
+    const provider = this._provider as any;
     return {
       hash: '0x' + '1'.repeat(64),
-      wait: () => Promise.resolve({
-        status: 1,
-        transactionHash: '0x' + '1'.repeat(64)
-      })
+      wait: () => {
+        const fallback = {
+          status: 1,
+          transactionHash: '0x' + '1'.repeat(64),
+          blockNumber: 12345678,
+          gasUsed: BigNumber.from(21000),
+        };
+        const receipt = provider && provider._mockTransactionReceipt
+          ? provider._mockTransactionReceipt
+          : fallback;
+        // Normalize gasUsed/cumulativeGasUsed/effectiveGasPrice if provided as strings
+        if (receipt && receipt.gasUsed && !BigNumber.isBigNumber(receipt.gasUsed)) {
+          receipt.gasUsed = BigNumber.from(receipt.gasUsed);
+        }
+        if (receipt && receipt.cumulativeGasUsed && !BigNumber.isBigNumber(receipt.cumulativeGasUsed)) {
+          receipt.cumulativeGasUsed = BigNumber.from(receipt.cumulativeGasUsed);
+        }
+        if (receipt && receipt.effectiveGasPrice && !BigNumber.isBigNumber(receipt.effectiveGasPrice)) {
+          receipt.effectiveGasPrice = BigNumber.from(receipt.effectiveGasPrice);
+        }
+        return Promise.resolve(receipt);
+      }
     };
   }
 
@@ -92,8 +112,15 @@ export class MockProvider extends providers.JsonRpcProvider {
   private _signer: MockJsonRpcSigner;
   private _mockError: Error | null = null;
   private _mockEscrow: any = null;
-  public _isProvider = true;
+  private _mockTransactionReceipt: any = null;
   public _network: providers.Network;
+
+  // Internal no-op to ensure private fields are "read" for TS
+  private _touchInternals(): void {
+    void this._mockError;
+    void this._mockEscrow;
+    void this._mockTransactionReceipt;
+  }
 
   // Mock methods for testing
   public setMockError(error: Error | null) {
@@ -104,6 +131,20 @@ export class MockProvider extends providers.JsonRpcProvider {
     this._mockEscrow = escrow;
   }
 
+  public setMockTransactionReceipt(receipt: any) {
+    const normalized: any = { ...receipt };
+    if (normalized.gasUsed && !BigNumber.isBigNumber(normalized.gasUsed)) {
+      normalized.gasUsed = BigNumber.from(normalized.gasUsed);
+    }
+    if (normalized.cumulativeGasUsed && !BigNumber.isBigNumber(normalized.cumulativeGasUsed)) {
+      normalized.cumulativeGasUsed = BigNumber.from(normalized.cumulativeGasUsed);
+    }
+    if (normalized.effectiveGasPrice && !BigNumber.isBigNumber(normalized.effectiveGasPrice)) {
+      normalized.effectiveGasPrice = BigNumber.from(normalized.effectiveGasPrice);
+    }
+    this._mockTransactionReceipt = normalized;
+  }
+
   public static create(): MockProvider {
     return new MockProvider();
   }
@@ -112,6 +153,7 @@ export class MockProvider extends providers.JsonRpcProvider {
     super('http://localhost:8545');
     this._network = { chainId: 1, name: 'mainnet' };
     this._signer = new MockJsonRpcSigner(this);
+    this._touchInternals();
   }
 
   // Override getNetwork to return our mock network
@@ -123,17 +165,22 @@ export class MockProvider extends providers.JsonRpcProvider {
     return this._blockNumber;
   }
 
-  public async getCode(address: string): Promise<string> {
+  public async getCode(_address: string): Promise<string> {
     return '0x' + '00'.repeat(32);
   }
 
-  public async getBalance(address: string): Promise<BigNumber> {
+  public async getBalance(_address: string): Promise<BigNumber> {
     return BigNumber.from('1000000000000000000'); // 1 ETH
   }
 
-  public getSigner(_addressOrIndex?: string | number): providers.JsonRpcSigner {
-    return this._signer;
+  public getSigner(_addressOrIndex?: string | number): any {
+    return this._signer as any;
   }
+
+  // Expose a mock sendTransaction on the provider to satisfy tests that assert on provider.sendTransaction
+  public sendTransaction = jest.fn(async (transaction: any) => {
+    return this._signer.sendTransaction(transaction);
+  });
 
   public async send(_method: string, _params: any[]): Promise<any> {
     return '';
@@ -151,7 +198,12 @@ export class MockProvider extends providers.JsonRpcProvider {
 export class MockSigner extends Signer {
   private _address = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
   private _nonce = 0;
-  private _provider?: providers.Provider;
+  public provider?: providers.Provider;
+  
+  constructor(provider?: providers.Provider) {
+    super();
+    this.provider = provider;
+  }
 
   public async getAddress(): Promise<string> {
     return this._address;
@@ -161,12 +213,12 @@ export class MockSigner extends Signer {
     this._address = address;
   }
 
-  public async signMessage(message: string | Uint8Array): Promise<string> {
+  public async signMessage(_message: string | Uint8Array): Promise<string> {
     return '0x' + '1'.repeat(130);
   }
 
   public async signTransaction(
-    transaction: providers.TransactionRequest
+    _transaction: providers.TransactionRequest
   ): Promise<string> {
     return '0x' + '1'.repeat(130);
   }
@@ -214,17 +266,20 @@ export class MockSigner extends Signer {
     return this;
   }
 
-  public connect(): Signer {
+  public connect(provider?: providers.Provider): Signer {
+    if (provider) {
+      this.provider = provider;
+    }
     return this;
   }
 
   public async getTransactionCount(
-    blockTag?: providers.BlockTag
+    _blockTag?: providers.BlockTag
   ): Promise<number> {
     return this._nonce;
   }
 
-  public async getBalance(blockTag?: providers.BlockTag): Promise<BigNumber> {
+  public async getBalance(_blockTag?: providers.BlockTag): Promise<BigNumber> {
     return BigNumber.from('1000000000000000000'); // 1 ETH
   }
 
@@ -236,13 +291,13 @@ export class MockSigner extends Signer {
     return BigNumber.from(1000000000);
   }
 
-  public async estimateGas(transaction: providers.TransactionRequest): Promise<BigNumber> {
+  public async estimateGas(_transaction: providers.TransactionRequest): Promise<BigNumber> {
     return BigNumber.from(21000);
   }
 
   public async call(
-    transaction: providers.TransactionRequest,
-    blockTag?: providers.BlockTag
+    _transaction: providers.TransactionRequest,
+    _blockTag?: providers.BlockTag
   ): Promise<string> {
     return '0x';
   }
@@ -267,7 +322,7 @@ export class MockContract extends Contract {
     return new MockContract(address, contractInterface, signerOrProvider);
   }
 
-  public async getOrderState(orderId: string): Promise<{
+  public async getOrderState(_orderId: string): Promise<{
     status: number;
     filledAmount: BigNumber;
     remainingAmount: BigNumber;
@@ -280,12 +335,12 @@ export class MockContract extends Contract {
   }
 
   public async executePartialFill(
-    orderId: string,
-    fillAmount: BigNumberish,
+    _orderId: string,
+    _fillAmount: BigNumberish,
     taker: string,
-    signature: string,
-    maxFee: BigNumberish,
-    deadline: BigNumberish
+    _signature: string,
+    _maxFee: BigNumberish,
+    _deadline: BigNumberish
   ): Promise<TransactionResponse> {
     return {
       hash: '0x' + '1'.repeat(64),
@@ -321,9 +376,9 @@ export class MockContract extends Contract {
 
   public async createEscrow(
     taker: string,
-    amount: BigNumberish,
-    timelock: BigNumberish,
-    hashlock: string
+    _amount: BigNumberish,
+    _timelock: BigNumberish,
+    _hashlock: string
   ): Promise<ethers.providers.TransactionResponse> {
     const txHash = '0x' + '1'.repeat(64);
     

@@ -3,10 +3,9 @@
  * Tests all validation methods with positive and negative cases
  */
 
-import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { ValidationService } from '../../src/services/ValidationService.js';
-import { ValidationError } from '../../src/utils/errors.js';
+import { ValidationService } from '../../src/services/ValidationService';
+import { ValidationError } from '../../src/utils/errors';
 
 describe('ValidationService', () => {
   let validationService: ValidationService;

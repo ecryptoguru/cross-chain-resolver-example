@@ -256,9 +256,11 @@ export class DynamicAuctionService {
       const totalCost = outputAmount.add(totalFee);
       
       // Enforce minimum fill amount
-      const minFillAmount = fromAmountBN.mul(auctionConfig.minFillPercentage * 100).div(100);
-      if (outputAmount.lt(minFillAmount)) {
-        throw new Error(`Fill amount too small. Minimum: ${minFillAmount.toString()}`);
+      const minFillPctScaled = Math.floor((auctionConfig.minFillPercentage ?? 0) * 100);
+      const minFillFromAmount = fromAmountBN.mul(minFillPctScaled).div(100);
+      const minFillOutputAmount = this.calculateOutputAmount(minFillFromAmount, adjustedRate, params);
+      if (outputAmount.lt(minFillOutputAmount)) {
+        throw new Error(`Fill amount too small. Minimum: ${minFillOutputAmount.toString()}`);
       }
       
       logger.debug('1inch Fusion+ auction rate calculation', {

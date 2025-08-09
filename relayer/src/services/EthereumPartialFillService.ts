@@ -128,13 +128,45 @@ export class EthereumPartialFillService {
       
       const state = await resolver.getOrderState(orderHash);
       
+      // Support both tuple (array) and object return shapes
+      if (Array.isArray(state)) {
+        const [
+          filledAmount,
+          remainingAmount,
+          fillCount,
+          isFullyFilled,
+          isCancelled,
+          lastFillTimestamp,
+          childOrders,
+        ] = state;
+        return {
+          filledAmount: BigNumber.from(filledAmount).toString(),
+          remainingAmount: BigNumber.from(remainingAmount).toString(),
+          fillCount: typeof fillCount === 'number' ? fillCount : BigNumber.from(fillCount).toNumber(),
+          isFullyFilled: Boolean(isFullyFilled),
+          isCancelled: Boolean(isCancelled),
+          lastFillTimestamp:
+            typeof lastFillTimestamp === 'number'
+              ? lastFillTimestamp
+              : BigNumber.from(lastFillTimestamp).toNumber(),
+          childOrders: Array.isArray(childOrders) ? childOrders : [],
+        };
+      }
+
+      // Object shape
       return {
-        filledAmount: state.filledAmount.toString(),
-        remainingAmount: state.remainingAmount.toString(),
-        fillCount: state.fillCount.toNumber(),
-        isFullyFilled: state.isFullyFilled,
-        isCancelled: state.isCancelled,
-        lastFillTimestamp: state.lastFillTimestamp.toNumber(),
+        filledAmount: BigNumber.from(state.filledAmount).toString(),
+        remainingAmount: BigNumber.from(state.remainingAmount).toString(),
+        fillCount:
+          typeof state.fillCount === 'number'
+            ? state.fillCount
+            : BigNumber.from(state.fillCount).toNumber(),
+        isFullyFilled: Boolean(state.isFullyFilled),
+        isCancelled: Boolean(state.isCancelled),
+        lastFillTimestamp:
+          typeof state.lastFillTimestamp === 'number'
+            ? state.lastFillTimestamp
+            : BigNumber.from(state.lastFillTimestamp).toNumber(),
         childOrders: state.childOrders || [],
       };
     } catch (error) {

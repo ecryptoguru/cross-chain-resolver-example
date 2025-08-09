@@ -2,7 +2,7 @@
  * Comprehensive test suite for InputValidator
  */
 
-import { InputValidator } from '../../src/utils/InputValidator.js';
+import { InputValidator } from '../../src/utils/InputValidator';
 
 describe('InputValidator', () => {
   describe('validateEthereumAddress', () => {

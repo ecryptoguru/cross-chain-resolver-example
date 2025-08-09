@@ -1,10 +1,10 @@
 import { jest } from '@jest/globals';
 import { BigNumber, ethers } from 'ethers';
-import { EthereumPartialFillService } from '../../../src/services/EthereumPartialFillService.js';
-import { logger } from '../../../src/utils/logger.js';
+import { EthereumPartialFillService } from '../../../src/services/EthereumPartialFillService';
+import { logger } from '../../../src/utils/logger';
 
 // Mock logger to prevent console output during tests
-jest.mock('../../../src/utils/logger.js', () => ({
+jest.mock('../../../src/utils/logger', () => ({
   logger: {
     info: jest.fn(),
     error: jest.fn(),
@@ -14,21 +14,21 @@ jest.mock('../../../src/utils/logger.js', () => ({
 
 // Mock ethers provider and signer
 const mockProvider = {
-  getBlockNumber: jest.fn().mockResolvedValue(1000000),
-  getNetwork: jest.fn().mockResolvedValue({ chainId: 1 }),
+  getBlockNumber: jest.fn(async () => 1000000),
+  getNetwork: jest.fn(async () => ({ chainId: 1 })),
 };
 
 const mockSigner = {
-  getAddress: jest.fn().mockResolvedValue('0x1234567890123456789012345678901234567890'),
-  getChainId: jest.fn().mockResolvedValue(1),
-  signMessage: jest.fn().mockResolvedValue('0xsignedMessage'),
-  sendTransaction: jest.fn().mockResolvedValue({
-    hash: '0xtxhash',
-    wait: jest.fn().mockResolvedValue({
+  getAddress: jest.fn(async () => '0x1234567890123456789012345678901234567890'),
+  getChainId: jest.fn(async () => 1),
+  signMessage: jest.fn(async () => '0xsignedMessage'),
+  sendTransaction: jest.fn(async () => ({
+    hash: '0x' + '1'.repeat(64),
+    wait: jest.fn(async () => ({
       status: 1,
-      logs: [],
-    }),
-  }),
+      logs: [] as any[],
+    })),
+  })),
 };
 
 describe('EthereumPartialFillService', () => {
@@ -64,12 +64,12 @@ describe('EthereumPartialFillService', () => {
     it('should process a partial fill successfully', async () => {
       // Arrange
       const mockTxResponse = {
-        hash: '0xtxhash',
-        wait: jest.fn().mockResolvedValue({ status: 1 }),
+        hash: '0x' + '1'.repeat(64),
+        wait: jest.fn(async () => ({ status: 1 })),
       };
       
       const mockContract = {
-        processPartialFill: jest.fn().mockResolvedValue(mockTxResponse),
+        processPartialFill: jest.fn(async () => mockTxResponse),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -95,7 +95,7 @@ describe('EthereumPartialFillService', () => {
       );
       expect(logger.info).toHaveBeenCalledWith(
         `Partial fill transaction sent for order ${sampleOrderHash}`,
-        { txHash: '0xtxhash' }
+        { txHash: '0x' + '1'.repeat(64) }
       );
     });
     
@@ -103,7 +103,7 @@ describe('EthereumPartialFillService', () => {
       // Arrange
       const error = new Error('Transaction failed');
       const mockContract = {
-        processPartialFill: jest.fn().mockRejectedValue(error),
+        processPartialFill: jest.fn(async () => { throw error; }),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -130,12 +130,12 @@ describe('EthereumPartialFillService', () => {
       // Arrange
       const amounts = ['500000000000000000', '500000000000000000']; // Split into two 0.5 ETH orders
       const mockTxResponse = {
-        hash: '0xsplittxhash',
-        wait: jest.fn().mockResolvedValue({ status: 1 }),
+        hash: '0x' + '2'.repeat(64),
+        wait: jest.fn(async () => ({ status: 1 })),
       };
       
       const mockContract = {
-        splitOrder: jest.fn().mockResolvedValue(mockTxResponse),
+        splitOrder: jest.fn(async () => mockTxResponse),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -152,7 +152,7 @@ describe('EthereumPartialFillService', () => {
       );
       expect(logger.info).toHaveBeenCalledWith(
         `Order split transaction sent for ${sampleOrderHash}`,
-        { txHash: '0xsplittxhash' }
+        { txHash: '0x' + '2'.repeat(64) }
       );
     });
   });
@@ -161,12 +161,12 @@ describe('EthereumPartialFillService', () => {
     it('should process a refund successfully', async () => {
       // Arrange
       const mockTxResponse = {
-        hash: '0xrefundtxhash',
-        wait: jest.fn().mockResolvedValue({ status: 1 }),
+        hash: '0x' + '3'.repeat(64),
+        wait: jest.fn(async () => ({ status: 1 })),
       };
       
       const mockContract = {
-        processRefund: jest.fn().mockResolvedValue(mockTxResponse),
+        processRefund: jest.fn(async () => mockTxResponse),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -183,7 +183,7 @@ describe('EthereumPartialFillService', () => {
       );
       expect(logger.info).toHaveBeenCalledWith(
         `Refund transaction sent for order ${sampleOrderHash}`,
-        { txHash: '0xrefundtxhash' }
+        { txHash: '0x' + '3'.repeat(64) }
       );
     });
   });
@@ -198,11 +198,11 @@ describe('EthereumPartialFillService', () => {
         isFullyFilled: false,
         isCancelled: false,
         lastFillTimestamp: Math.floor(Date.now() / 1000),
-        childOrders: [],
+        childOrders: [] as string[],
       };
       
       const mockContract = {
-        getOrderState: jest.fn().mockResolvedValue([
+        getOrderState: jest.fn(async () => [
           mockState.filledAmount,
           mockState.remainingAmount,
           mockState.fillCount,
@@ -210,7 +210,7 @@ describe('EthereumPartialFillService', () => {
           mockState.isCancelled,
           mockState.lastFillTimestamp,
           mockState.childOrders,
-        ]),
+        ] as any),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -237,15 +237,15 @@ describe('EthereumPartialFillService', () => {
     it('should return true if the order can be partially filled', async () => {
       // Arrange
       const mockContract = {
-        getOrderState: jest.fn().mockResolvedValue([
+        getOrderState: jest.fn(async () => [
           BigNumber.from('500000000000000000'), // 0.5 ETH filled
           BigNumber.from('500000000000000000'), // 0.5 ETH remaining
           1, // fillCount
           false, // isFullyFilled
           false, // isCancelled
           Math.floor(Date.now() / 1000), // lastFillTimestamp
-          [], // childOrders
-        ]),
+          [] as string[], // childOrders
+        ] as any),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -263,15 +263,15 @@ describe('EthereumPartialFillService', () => {
     it('should return false if the order is already fully filled', async () => {
       // Arrange
       const mockContract = {
-        getOrderState: jest.fn().mockResolvedValue([
+        getOrderState: jest.fn(async () => [
           BigNumber.from('1000000000000000000'), // 1 ETH filled
           BigNumber.from('0'), // 0 ETH remaining
           1, // fillCount
           true, // isFullyFilled
           false, // isCancelled
           Math.floor(Date.now() / 1000), // lastFillTimestamp
-          [], // childOrders
-        ]),
+          [] as string[], // childOrders
+        ] as any),
       };
       
       jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
@@ -295,7 +295,7 @@ describe('EthereumPartialFillService', () => {
       
       const mockContract = {
         estimateGas: {
-          processPartialFill: jest.fn().mockResolvedValue(estimatedGas),
+          processPartialFill: jest.fn(async () => estimatedGas),
         },
       };
       

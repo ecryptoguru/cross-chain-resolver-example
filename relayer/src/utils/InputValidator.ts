@@ -24,10 +24,25 @@ export class InputValidator {
       errors.push(`${fieldName} is required`);
     } else if (typeof address !== 'string') {
       errors.push(`${fieldName} must be a string`);
-    } else if (!ethers.utils.isAddress(address)) {
-      errors.push(`${fieldName} is not a valid Ethereum address`);
-    } else if (address === ethers.constants.AddressZero) {
-      warnings.push(`${fieldName} is the zero address`);
+    } else {
+      // Accept any 0x-prefixed 40-hex address as valid; use checksum only for warnings
+      const isBasicHex = /^0x[0-9a-fA-F]{40}$/.test(address);
+      if (!isBasicHex) {
+        errors.push(`${fieldName} is not a valid Ethereum address`);
+      } else {
+        // If checksum validation fails, warn but do not invalidate
+        try {
+          if (!ethers.utils.isAddress(address)) {
+            warnings.push(`${fieldName} checksum is invalid`);
+          }
+        } catch {
+          // Ignore checksum validation errors
+        }
+
+        if (address === ethers.constants.AddressZero) {
+          warnings.push(`${fieldName} is the zero address`);
+        }
+      }
     }
 
     return {

@@ -1,11 +1,11 @@
-import '@testing-library/jest-dom';
-import { jest } from '@jest/globals';
+/// <reference types="jest" />
+// TypeScript test setup file for Jest
 
-// Set up global test environment - suppress console output during tests
-const originalConsole = global.console;
+// Store original console methods
+const originalConsole = { ...console };
 
-global.console = {
-  ...originalConsole,
+// Create mock console methods
+const consoleMocks = {
   log: jest.fn(),
   debug: jest.fn(),
   info: jest.fn(),
@@ -13,8 +13,23 @@ global.console = {
   error: jest.fn(),
 };
 
-// Restore original console after tests
-// @ts-ignore
+// Set up mocks before all tests
+beforeAll(() => {
+  // Apply mock console
+  Object.assign(console, consoleMocks);
+  
+  // Set any global test configurations here
+  
+  // Add any global test setup here
+});
+
+// Clean up after all tests
 afterAll(() => {
-  global.console = originalConsole;
+  // Restore original console methods
+  Object.assign(console, originalConsole);
+});
+
+// Reset mocks between tests
+afterEach(() => {
+  jest.clearAllMocks();
 });

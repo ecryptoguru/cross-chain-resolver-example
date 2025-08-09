@@ -21,6 +21,10 @@ export interface NearRelayerConfig {
   ethereum: {
     rpcUrl: string;
     privateKey: string;
+    /** Optional injected provider for testing */
+    provider?: ethers.providers.JsonRpcProvider;
+    /** Optional injected signer for testing */
+    signer?: ethers.Signer;
   };
   ethereumEscrowFactoryAddress: string;
   escrowContractId: string;
@@ -67,8 +71,9 @@ export class NearRelayer implements IMessageProcessor {
       nearProvider,
       config.escrowContractId
     );
-    const ethereumProvider = new ethers.providers.JsonRpcProvider(config.ethereum.rpcUrl);
-    const ethereumSigner = new ethers.Wallet(config.ethereum.privateKey, ethereumProvider);
+    // Allow tests to inject mocked provider/signer
+    const ethereumProvider = config.ethereum.provider ?? new ethers.providers.JsonRpcProvider(config.ethereum.rpcUrl);
+    const ethereumSigner = config.ethereum.signer ?? new ethers.Wallet(config.ethereum.privateKey, ethereumProvider);
     this.ethereumContractService = new EthereumContractService(
       ethereumProvider,
       ethereumSigner,

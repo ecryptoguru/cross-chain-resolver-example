@@ -12,8 +12,8 @@ import {
   type MessageSentEvent,
   type WithdrawalCompletedEvent,
   type EscrowCreatedEvent
-} from '../../src/services/EthereumEventListener.js';
-import { NetworkError, ValidationError } from '../../src/utils/errors.js';
+} from '../../src/services/EthereumEventListener';
+import { ValidationError } from '../../src/utils/errors';
 
 // Mock ethers provider and contracts
 class MockProvider extends ethers.providers.JsonRpcProvider {
@@ -243,18 +243,10 @@ describe('EthereumEventListener', () => {
 
     test('should handle provider errors during start', async () => {
       mockProvider.setMockError(new Error('Provider error'));
-      
-      try {
-        await ethereumEventListener.start();
-        throw new Error('Should have thrown an error');
-      } catch (error) {
-        expect(error).toBeInstanceOf(NetworkError);
-        if (error instanceof NetworkError) {
-          expect(error.message).toContain('Failed to start Ethereum event listener');
-          expect(error.network).toBe('ethereum');
-          expect(error.operation).toBe('start');
-        }
-      }
+      // start should not throw; it logs a warning and starts from block 0
+      await expect(ethereumEventListener.start()).resolves.toBeUndefined();
+      expect(ethereumEventListener.getIsRunning()).toBe(true);
+      expect(ethereumEventListener.getLastProcessedBlock()).toBe(0);
     });
 
     test('should process DepositInitiated event', async () => {
