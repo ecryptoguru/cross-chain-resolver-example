@@ -22,6 +22,8 @@ export class MockJsonRpcSigner {
   constructor(provider?: any, address?: string) {
     this._provider = provider;
     this._address = address || '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+    // Mark as a valid ethers Signer
+    (this as any)._isSigner = true;
   }
 
   async getAddress(): Promise<string> {
@@ -151,7 +153,7 @@ export class MockProvider extends providers.JsonRpcProvider {
 
   constructor() {
     super('http://localhost:8545');
-    this._network = { chainId: 1, name: 'mainnet' };
+    this._network = { chainId: 11155111, name: 'sepolia' };
     this._signer = new MockJsonRpcSigner(this);
     this._touchInternals();
   }
@@ -235,7 +237,7 @@ export class MockSigner extends Signer {
       gasPrice: BigNumber.from(1000000000),
       data: '0x',
       value: BigNumber.from(0),
-      chainId: 1,
+      chainId: 11155111,
       confirmations: 0,
       from: this._address,
       wait: async (confirmations?: number): Promise<MockTransactionReceipt> => ({
@@ -284,7 +286,7 @@ export class MockSigner extends Signer {
   }
 
   public async getChainId(): Promise<number> {
-    return 1;
+    return 11155111;
   }
 
   public async getGasPrice(): Promise<BigNumber> {

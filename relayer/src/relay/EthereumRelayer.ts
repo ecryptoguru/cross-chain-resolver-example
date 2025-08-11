@@ -11,7 +11,7 @@ import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { DynamicAuctionService, CrossChainAuctionParams } from '../services/DynamicAuctionService.js';
+import { DynamicAuctionService, CrossChainAuctionParams, AuctionConfig } from '../services/DynamicAuctionService.js';
 import { EthereumPartialFillService, PartialFillParams } from '../services/EthereumPartialFillService.js';
 
 export interface EthereumRelayerConfig {
@@ -24,6 +24,8 @@ export interface EthereumRelayerConfig {
   resolverAbi?: any[]; // For partial fills
   pollIntervalMs?: number;
   storageDir?: string;
+  // Optional auction configuration to pass into DynamicAuctionService when DI not provided
+  auctionConfig?: AuctionConfig;
 }
 
 export class EthereumRelayer implements IMessageProcessor {
@@ -38,7 +40,8 @@ export class EthereumRelayer implements IMessageProcessor {
   private orderStatusMap: Map<string, any> = new Map(); // For tracking order status
   private isRunning = false;
 
-  constructor(config: EthereumRelayerConfig) {
+  // Allow dependency injection for improved testability
+  constructor(config: EthereumRelayerConfig, deps?: { auctionService?: DynamicAuctionService }) {
     this.config = config;
 
     // Initialize services first
@@ -47,7 +50,8 @@ export class EthereumRelayer implements IMessageProcessor {
     // Then validate config
     this.validateConfig(config);
     this.storage = new StorageService(config.storageDir, 'ethereum_processed_messages.json');
-    this.auctionService = new DynamicAuctionService();
+    // Prefer injected auction service; fall back to local construction
+    this.auctionService = deps?.auctionService ?? new DynamicAuctionService();
     this.contractService = new EthereumContractService(
       config.provider,
       config.signer,
@@ -79,6 +83,22 @@ export class EthereumRelayer implements IMessageProcessor {
       eventHandlers,
       config.pollIntervalMs
     );
+  }
+
+  /**
+   * Compute a keccak256 hash from an input string using raw bytes.
+   * - If input is a 0x-prefixed hex string, hash its raw bytes
+   * - Otherwise, fall back to UTF-8 bytes (legacy tests/mocks)
+   */
+  private computeSecretHash(input: string): string {
+    try {
+      const isHex = typeof input === 'string' && input.startsWith('0x') && input.length % 2 === 0;
+      const bytes = isHex ? ethers.utils.arrayify(input) : ethers.utils.toUtf8Bytes(input);
+      return ethers.utils.keccak256(bytes);
+    } catch (e) {
+      // As a last resort, attempt direct keccak256 on input (ethers will throw if invalid)
+      return ethers.utils.keccak256(input as unknown as ethers.utils.BytesLike);
+    }
   }
 
   /**
@@ -210,8 +230,8 @@ export class EthereumRelayer implements IMessageProcessor {
       });
 
       // Create NEAR escrow for ETH→NEAR cross-chain transfer
-      // Generate consistent secret hash for cross-chain transfer
-      const secretHash = ethers.utils.keccak256(event.depositId);
+      // Generate consistent secret hash for cross-chain transfer using raw bytes
+      const secretHash = this.computeSecretHash(event.depositId);
       
       await this.createNearEscrowFromEthOrder(
         event.sender,
@@ -380,8 +400,11 @@ export class EthereumRelayer implements IMessageProcessor {
         orderId: message.data.txHash
       };
 
-      // Get current auction rate and output amount
-      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams);
+      // Validate runtime auction parameters
+      this.validator.validateAuctionRuntimeParams(auctionParams);
+
+      // Get current auction rate and output amount (use optional auction config overrides)
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams, this.config.auctionConfig);
       
       // Create escrow on Ethereum
       const escrowTx = await this.contractService.executeFactoryTransaction(
@@ -448,9 +471,9 @@ export class EthereumRelayer implements IMessageProcessor {
         amount: message.amount
       });
 
-      // Find and execute withdrawal on Ethereum escrow
+      // Find and execute withdrawal on Ethereum escrow using consistent raw-bytes hash
       const escrow = await this.contractService.findEscrowByParams({
-        secretHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(message.secret))
+        secretHash: this.computeSecretHash(message.secret)
       });
 
       if (!escrow) {
@@ -546,8 +569,11 @@ export class EthereumRelayer implements IMessageProcessor {
         orderId: orderId
       };
       
-      // Calculate current auction rate and amounts
-      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams);
+      // Validate runtime auction parameters
+      this.validator.validateAuctionRuntimeParams(auctionParams);
+
+      // Calculate current auction rate and amounts (use optional auction config overrides)
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams, this.config.auctionConfig);
       const nearAmountYocto = ethers.BigNumber.from(auctionResult.outputAmount);
       const feeAmount = ethers.BigNumber.from(auctionResult.feeAmount);
       const totalNearValue = ethers.BigNumber.from(auctionResult.totalCost);
@@ -643,8 +669,8 @@ export class EthereumRelayer implements IMessageProcessor {
       }
 
       // Generate consistent secret hash for cross-chain transfer
-      // Use escrow address as unique identifier for the transfer
-      const secretHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(event.escrow));
+      // Use escrow address as unique identifier, hashed using raw bytes (address hex)
+      const secretHash = this.computeSecretHash(event.escrow);
       
       // Create NEAR escrow with relayer's NEAR liquidity
       await this.createNearEscrowFromEthOrder(
@@ -943,6 +969,12 @@ export class EthereumRelayer implements IMessageProcessor {
 
     this.validator.validateEthereumAddress(config.factoryAddress);
     this.validator.validateEthereumAddress(config.bridgeAddress);
+
+    // If provided, validate auction configuration early to surface misconfigurations
+    if (config.auctionConfig) {
+      this.validator.validateAuctionConfig(config.auctionConfig);
+      logger.debug('Auction configuration validated');
+    }
   }
 
   /**

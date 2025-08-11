@@ -16,8 +16,9 @@ beforeEach(() => {
   // Reset all mocks before each test
   jest.clearAllMocks();
   
-  // Use fake timers by default
-  jest.useFakeTimers();
+  // Use real timers by default (integration tests rely on real time for polling)
+  // Individual tests can switch to fake timers when needed
+  jest.useRealTimers();
   
   // Set up global test configuration
   global.testConfig = MOCK_CONFIG;
@@ -86,33 +87,108 @@ jest.mock('ethers', () => {
         })),
       })),
     },
-    Contract: jest.fn().mockImplementation(() => ({
-      address: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-      processPartialFill: jest.fn().mockResolvedValue({
-        wait: jest.fn().mockResolvedValue({
-          events: [],
-          transactionHash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
-        }),
-      }),
-      splitOrder: jest.fn().mockResolvedValue({
-        wait: jest.fn().mockResolvedValue({
-          events: [],
-          transactionHash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
-        }),
-      }),
-      processRefund: jest.fn().mockResolvedValue({
-        wait: jest.fn().mockResolvedValue({
-          events: [],
-          transactionHash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
-        }),
-      }),
-      getOrderState: jest.fn().mockResolvedValue({
-        filledAmount: '500000000000000000',
-        remainingAmount: '500000000000000000',
-        isFullyFilled: false,
-        isCancelled: false,
-      }),
-    })),
+    // Contract mock that supports:
+    // - Writes: route through signer.sendTransaction (so spies fire)
+    // - Reads: getDetails() returns provider._mockEscrow shape
+    // - Events: filters.EscrowCreated + queryFilter
+    // - Gas: estimateGas.withdraw
+    Contract: jest.fn().mockImplementation((address, _abi, signerOrProvider) => {
+      const state = {
+        address,
+        _signer: signerOrProvider && typeof signerOrProvider.sendTransaction === 'function' ? signerOrProvider : null,
+        _provider: signerOrProvider && typeof signerOrProvider.sendTransaction !== 'function' ? signerOrProvider : null,
+      };
+
+      const handler = {
+        get(_target, prop) {
+          if (prop === 'address') return state.address;
+          if (prop === 'connect') {
+            return (signer) => {
+              state._signer = signer;
+              return new Proxy({}, handler);
+            };
+          }
+          if (prop === 'filters') {
+            return {
+              EscrowCreated: () => ({ event: 'EscrowCreated' }),
+            };
+          }
+          if (prop === 'queryFilter') {
+            return async (_filter, _fromBlock, _toBlock) => {
+              const escrow = state._provider && state._provider._mockEscrow ? state._provider._mockEscrow : null;
+              const escrowAddress = escrow && escrow.escrowAddress ? escrow.escrowAddress : '0x' + '5'.repeat(40);
+              return [
+                {
+                  args: [escrowAddress],
+                  blockNumber: 1,
+                },
+              ];
+            };
+          }
+          if (prop === 'estimateGas') {
+            return new Proxy({}, {
+              get(_t, gasProp) {
+                if (gasProp === 'withdraw') {
+                  return async () => 100000n;
+                }
+                return async () => 100000n;
+              },
+            });
+          }
+          // Read: getDetails via provider mock
+          if (prop === 'getDetails') {
+            return async () => {
+              const escrow = state._provider && state._provider._mockEscrow ? state._provider._mockEscrow : null;
+              if (!escrow) {
+                return {
+                  status: 1,
+                  token: '0x' + '0'.repeat(40),
+                  amount: original.BigNumber.from('0'),
+                  timelock: original.BigNumber.from(Math.floor(Date.now() / 1000) + 3600),
+                  secretHash: '0x' + '1'.repeat(64),
+                  initiator: '0x' + '2'.repeat(40),
+                  recipient: '0x' + '3'.repeat(40),
+                  chainId: original.BigNumber.from(11155111),
+                };
+              }
+              const toBN = (v) => (typeof v === 'string' || typeof v === 'number') ? original.BigNumber.from(v.toString()) : v;
+              return {
+                status: escrow.status === 'active' ? 1 : (escrow.status === 'withdrawn' ? 2 : 0),
+                token: escrow.token || '0x' + '0'.repeat(40),
+                amount: toBN(escrow.amount || '0'),
+                timelock: toBN(escrow.timelock || Math.floor(Date.now() / 1000) + 3600),
+                secretHash: escrow.secretHash || ('0x' + '1'.repeat(64)),
+                initiator: escrow.initiator || ('0x' + '2'.repeat(40)),
+                recipient: escrow.recipient || ('0x' + '3'.repeat(40)),
+                chainId: toBN(escrow.chainId || 11155111),
+              };
+            };
+          }
+          // Writes: any contract method routes through signer.sendTransaction
+          if (typeof prop === 'string') {
+            return (...args) => {
+              const last = args.length > 0 ? args[args.length - 1] : undefined;
+              const overrides = last && typeof last === 'object' && (('gasLimit' in last) || ('value' in last)) ? last : undefined;
+              if (state._signer && typeof state._signer.sendTransaction === 'function') {
+                const txRequest = {
+                  to: state.address,
+                  data: '0x',
+                  ...(overrides && overrides.value ? { value: overrides.value } : {}),
+                };
+                return state._signer.sendTransaction(txRequest);
+              }
+              return Promise.resolve({
+                hash: '0x' + '1'.repeat(64),
+                wait: jest.fn().mockResolvedValue({ status: 1, logs: [], transactionHash: '0x' + '1'.repeat(64) }),
+              });
+            };
+          }
+          return undefined;
+        },
+      };
+
+      return new Proxy({}, handler);
+    }),
   };
 });
 

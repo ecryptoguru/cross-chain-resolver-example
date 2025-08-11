@@ -4,10 +4,10 @@
   "description": "Example of 1inch cross chain resolver",
   "type": "module",
   "scripts": {
-    "test": "NODE_OPTIONS='--experimental-vm-modules --no-warnings' jest",
-    "test:watch": "NODE_OPTIONS='--experimental-vm-modules --no-warnings' jest --watch",
-    "test:coverage": "NODE_OPTIONS='--experimental-vm-modules --no-warnings' jest --coverage",
-    "test:debug": "NODE_OPTIONS='--inspect-brk --experimental-vm-modules --no-warnings' node --inspect-brk ./node_modules/jest/bin/jest.js --runInBand",
+    "test": "jest --config ./relayer/jest.config.cjs",
+    "test:watch": "jest --config ./relayer/jest.config.cjs --watch",
+    "test:coverage": "jest --config ./relayer/jest.config.cjs --coverage",
+    "test:debug": "node --inspect-brk ./node_modules/jest/bin/jest.js --config ./relayer/jest.config.cjs --runInBand",
     "lint": "eslint \"**/*.{js,ts,tsx}\" --quiet --fix",
     "typecheck": "tsc --noEmit",
     "prepare": "husky install"

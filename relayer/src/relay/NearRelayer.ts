@@ -401,7 +401,7 @@ export class NearRelayer implements IMessageProcessor {
       }
 
       // Calculate secret hash to find the order
-      const secretHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(secret));
+      const secretHash = ethers.utils.keccak256('0x' + secret);
       
       // For now, we'll need to implement a way to find orders by secret hash
       // This is a simplified approach - in production, you'd want a more efficient lookup
@@ -969,16 +969,15 @@ export class NearRelayer implements IMessageProcessor {
     const makerAddress = await this.ethereumContractService.getSignerAddress();
     const takerAddress = ethers.utils.getAddress(event.recipient);
     
-    // CRITICAL: 1inch Address type expects uint256 representation of address
-    // Address is stored in lower 160 bits of uint256, upper bits can contain flags
-    // For basic addresses, we just need the address as uint256 (no flags)
+    // CRITICAL: Factory ABI expects plain Ethereum address types for maker/taker/token
+    // Pass checksummed address strings; do not convert to decimal BigNumbers to avoid ENS resolution errors
     
     const immutables = {
       orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
       hashlock: event.secretHash,
-      maker: ethers.BigNumber.from(makerAddress).toString(), // Convert address to uint256 for Address custom type
-      taker: ethers.BigNumber.from(takerAddress).toString(), // Convert address to uint256 for Address custom type
-      token: ethers.BigNumber.from(ethers.constants.AddressZero).toString(), // Convert address to uint256 for Address custom type
+      maker: makerAddress, // address
+      taker: takerAddress, // address
+      token: ethers.constants.AddressZero, // address
       amount: ethAmountWei.toString(), // ETH amount user will receive
       safetyDeposit: feeAmount.toString(), // Use auction fee as safety deposit
       timelocks: timelocksBitPacked.toString() // Properly encoded Timelocks value

@@ -5,7 +5,7 @@
 
 import { ethers } from 'ethers';
 import { IValidator } from '../types/interfaces.js';
-import { ValidationError, ErrorHandler } from '../utils/errors.js';
+import { ErrorHandler } from '../utils/errors.js';
 
 export class ValidationService implements IValidator {
   /**
@@ -285,6 +285,131 @@ export class ValidationService implements IValidator {
         this.validateNearAccountId(config.near.escrowContractId);
       }
     }
+
+    // Auction configuration (optional)
+    if (config.auction) {
+      this.validateAuctionConfig(config.auction);
+    }
+
+    return true;
+  }
+
+  /**
+   * Validates auction configuration object
+   * Only validates fields that are present (supports partial overrides)
+   */
+  validateAuctionConfig(config: any): boolean {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      throw ErrorHandler.createValidationError('auction', config, 'Auction config must be an object');
+    }
+
+    const ensureInteger = (name: string, val: unknown) => {
+      if (typeof val !== 'number' || !Number.isInteger(val)) {
+        throw ErrorHandler.createValidationError(`auction.${name}`, val, `${name} must be an integer`);
+      }
+    };
+
+    if (config.duration !== undefined) {
+      ensureInteger('duration', config.duration);
+      if (config.duration < 30 || config.duration > 1800) {
+        throw ErrorHandler.createValidationError('auction.duration', config.duration, 'duration must be between 30 and 1800 seconds');
+      }
+    }
+
+    if (config.initialRateBump !== undefined) {
+      ensureInteger('initialRateBump', config.initialRateBump);
+      if (config.initialRateBump < 0) {
+        throw ErrorHandler.createValidationError('auction.initialRateBump', config.initialRateBump, 'initialRateBump cannot be negative');
+      }
+    }
+
+    if (config.points !== undefined) {
+      if (!Array.isArray(config.points) || config.points.length === 0) {
+        throw ErrorHandler.createValidationError('auction.points', config.points, 'points must be a non-empty array');
+      }
+      let lastDelay = -1;
+      for (let i = 0; i < config.points.length; i++) {
+        const p = config.points[i];
+        if (!p || typeof p !== 'object') {
+          throw ErrorHandler.createValidationError(`auction.points[${i}]`, p, 'each point must be an object');
+        }
+        if (typeof p.delay !== 'number' || p.delay < 0 || !Number.isFinite(p.delay)) {
+          throw ErrorHandler.createValidationError(`auction.points[${i}].delay`, p.delay, 'delay must be a non-negative number');
+        }
+        if (typeof p.coefficient !== 'number' || !Number.isInteger(p.coefficient)) {
+          throw ErrorHandler.createValidationError(`auction.points[${i}].coefficient`, p.coefficient, 'coefficient must be an integer');
+        }
+        if (p.delay < lastDelay) {
+          throw ErrorHandler.createValidationError(`auction.points[${i}].delay`, p.delay, 'points must be sorted by ascending delay');
+        }
+        lastDelay = p.delay;
+      }
+    }
+
+    if (config.gasBumpEstimate !== undefined) {
+      ensureInteger('gasBumpEstimate', config.gasBumpEstimate);
+      if (config.gasBumpEstimate < 0) {
+        throw ErrorHandler.createValidationError('auction.gasBumpEstimate', config.gasBumpEstimate, 'gasBumpEstimate cannot be negative');
+      }
+    }
+
+    if (config.gasPriceEstimate !== undefined) {
+      if (typeof config.gasPriceEstimate !== 'number' || !Number.isFinite(config.gasPriceEstimate) || config.gasPriceEstimate < 0) {
+        throw ErrorHandler.createValidationError('auction.gasPriceEstimate', config.gasPriceEstimate, 'gasPriceEstimate must be a non-negative number');
+      }
+    }
+
+    if (config.minFillPercentage !== undefined) {
+      if (typeof config.minFillPercentage !== 'number' || !Number.isFinite(config.minFillPercentage) || config.minFillPercentage < 0 || config.minFillPercentage > 1) {
+        throw ErrorHandler.createValidationError('auction.minFillPercentage', config.minFillPercentage, 'minFillPercentage must be between 0 and 1');
+      }
+    }
+
+    if (config.maxRateBump !== undefined) {
+      ensureInteger('maxRateBump', config.maxRateBump);
+      if (config.maxRateBump < 0) {
+        throw ErrorHandler.createValidationError('auction.maxRateBump', config.maxRateBump, 'maxRateBump cannot be negative');
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Validates runtime auction parameters (order-level)
+   */
+  validateAuctionRuntimeParams(params: any): boolean {
+    if (!params || typeof params !== 'object' || Array.isArray(params)) {
+      throw ErrorHandler.createValidationError('auctionParams', params, 'Auction params must be an object');
+    }
+
+    const { fromChain, toChain, fromAmount, baseExchangeRate, startTime, orderId } = params as Record<string, unknown>;
+
+    if (fromChain !== 'NEAR' && fromChain !== 'ETH') {
+      throw ErrorHandler.createValidationError('auctionParams.fromChain', fromChain, "fromChain must be 'NEAR' or 'ETH'");
+    }
+    if (toChain !== 'NEAR' && toChain !== 'ETH') {
+      throw ErrorHandler.createValidationError('auctionParams.toChain', toChain, "toChain must be 'NEAR' or 'ETH'");
+    }
+    if (fromChain === toChain) {
+      throw ErrorHandler.createValidationError('auctionParams.toChain', toChain, 'toChain must differ from fromChain');
+    }
+
+    this.validateAmount(fromAmount as any);
+
+    if (typeof baseExchangeRate !== 'number' || !Number.isFinite(baseExchangeRate) || baseExchangeRate <= 0) {
+      throw ErrorHandler.createValidationError('auctionParams.baseExchangeRate', baseExchangeRate as any, 'baseExchangeRate must be a positive number');
+    }
+
+    if (typeof startTime !== 'number' || !Number.isInteger(startTime) || startTime < 0) {
+      throw ErrorHandler.createValidationError('auctionParams.startTime', startTime as any, 'startTime must be a non-negative integer (unix seconds)');
+    }
+
+    if (typeof orderId !== 'string') {
+      throw ErrorHandler.createValidationError('auctionParams.orderId', orderId as any, 'orderId must be a string');
+    }
+    // Reuse messageId constraints (6-128, alnum, - and _)
+    this.validateMessageId(orderId as string);
 
     return true;
   }

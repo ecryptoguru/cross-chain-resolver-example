@@ -25,16 +25,39 @@ const colors = {
 // Add colors to winston
 winston.addColors(colors);
 
+// Safe JSON.stringify that handles BigInt, ethers BigNumber and circular refs
+const safeStringify = (value: unknown): string => {
+  const seen = new WeakSet<object>();
+  const replacer = (_key: string, val: any) => {
+    const t = typeof val;
+    if (t === 'bigint') return val.toString();
+    if (val && t === 'object') {
+      // ethers BigNumber
+      if ((val as any)._isBigNumber && typeof (val as any).toString === 'function') {
+        try { return (val as any).toString(); } catch { return `${val}`; }
+      }
+      if (seen.has(val)) return '[Circular]';
+      seen.add(val);
+    }
+    return val;
+  };
+  try {
+    return JSON.stringify(value, replacer, 2);
+  } catch {
+    // Fallback best-effort
+    try { return String(value); } catch { return '[Unserializable]'; }
+  }
+};
+
 // Custom format for console logs
 const consoleFormat = printf(({ level, message, timestamp, ...metadata }) => {
-  return `${timestamp} [${level}]: ${message} ${
-    Object.keys(metadata).length ? JSON.stringify(metadata, null, 2) : ''
-  }`;
+  const metaStr = Object.keys(metadata).length ? safeStringify(metadata) : '';
+  return `${timestamp} [${level}]: ${message} ${metaStr}`;
 });
 
 // Custom format for file logs
 const fileFormat = printf(({ level, message, timestamp, ...metadata }) => {
-  return JSON.stringify({
+  return safeStringify({
     timestamp,
     level,
     message,

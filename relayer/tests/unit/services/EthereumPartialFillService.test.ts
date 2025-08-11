@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { BigNumber, ethers } from 'ethers';
+import { BigNumber } from 'ethers';
 import { EthereumPartialFillService } from '../../../src/services/EthereumPartialFillService';
 import { logger } from '../../../src/utils/logger';
 
@@ -72,7 +72,14 @@ describe('EthereumPartialFillService', () => {
         processPartialFill: jest.fn(async () => mockTxResponse),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const result = await service.processPartialFill({
@@ -106,7 +113,14 @@ describe('EthereumPartialFillService', () => {
         processPartialFill: jest.fn(async () => { throw error; }),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act & Assert
       await expect(
@@ -138,7 +152,14 @@ describe('EthereumPartialFillService', () => {
         splitOrder: jest.fn(async () => mockTxResponse),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const result = await service.splitOrder(sampleOrderHash, amounts);
@@ -169,7 +190,14 @@ describe('EthereumPartialFillService', () => {
         processRefund: jest.fn(async () => mockTxResponse),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const result = await service.processRefund(sampleOrderHash, sampleRecipient);
@@ -213,7 +241,14 @@ describe('EthereumPartialFillService', () => {
         ] as any),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const state = await service.getOrderState(sampleOrderHash);
@@ -248,7 +283,14 @@ describe('EthereumPartialFillService', () => {
         ] as any),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const result = await service.canPartiallyFill(
@@ -274,7 +316,14 @@ describe('EthereumPartialFillService', () => {
         ] as any),
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const result = await service.canPartiallyFill(
@@ -299,7 +348,14 @@ describe('EthereumPartialFillService', () => {
         },
       };
       
-      jest.spyOn(ethers, 'Contract').mockReturnValue(mockContract as any);
+      // Recreate service with injected ethers-like Contract mock
+      service = new EthereumPartialFillService(
+        mockProvider as any,
+        mockSigner as any,
+        resolverAddress,
+        resolverAbi,
+        { ethersLike: { Contract: jest.fn(() => mockContract) } as any }
+      );
       
       // Act
       const result = await service.estimateGasForPartialFill({

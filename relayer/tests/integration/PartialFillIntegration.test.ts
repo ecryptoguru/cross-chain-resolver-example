@@ -35,6 +35,8 @@ describe('Partial Fill Integration Tests', () => {
   let mockSigner: MockSigner;
 
   beforeEach(async () => {
+    // Use fake timers to make any internal polling deterministic
+    jest.useFakeTimers();
     // Mock Near partial fill service behaviors - let real canPartiallyFill run by mocking getOrderState
     jest.spyOn(NearPartialFillService.prototype, 'getOrderState').mockResolvedValue({
       filledAmount: '0',
@@ -113,7 +115,6 @@ describe('Partial Fill Integration Tests', () => {
   });
 
   afterEach(async () => {
-    jest.restoreAllMocks();
     // Cleanup
     if (nearRelayer?.isRelayerRunning()) {
       await nearRelayer.stop();
@@ -121,6 +122,8 @@ describe('Partial Fill Integration Tests', () => {
     if (ethereumRelayer?.isRelayerRunning()) {
       await ethereumRelayer.stop();
     }
+    jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   describe('NEAR Partial Fill Processing', () => {

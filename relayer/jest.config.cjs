@@ -7,7 +7,9 @@ module.exports = {
   // Test file patterns
   testMatch: [
     '**/tests/**/*.test.ts',
+    '**/tests/**/*.spec.ts',
     '**/src/**/*.test.ts',
+    '**/src/**/*.spec.ts',
   ],
   
   // Coverage configuration
@@ -33,8 +35,6 @@ module.exports = {
     '/dist/',
     // Ignore legacy duplicate test using old constructor shape
     '/tests/unit/EthereumContractService.new.test.ts',
-    // Temporarily ignore corrupted integration test until fixed
-    '/tests/integration/EthereumRelayer.test.ts',
   ],
   
   // Module name mapper
@@ -55,8 +55,6 @@ module.exports = {
         diagnostics: {
           ignoreCodes: [1343],
         },
-        // Disable type checking for tests to improve performance
-        isolatedModules: true,
       },
     ],
   },

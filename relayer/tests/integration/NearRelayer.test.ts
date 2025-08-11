@@ -3,7 +3,7 @@
  * Tests the complete relayer functionality with proper mocking
  */
 
-import { describe, test, expect, beforeEach, jest } from '@jest/globals';
+import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { NearRelayer } from '../../src/relay/NearRelayer';
 import { MockProvider, MockSigner } from '../mocks/ethers-mock-enhanced';
 import { MockNearAccount, MockNearProvider, MockNearConnection } from '../mocks/near-api-mock';
@@ -20,8 +20,22 @@ import { MessageType, CrossChainMessage } from '../../src/types/interfaces';
  */
 
 // Setup test environment
+let lastRelayer: NearRelayer | null = null;
+
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+afterEach(async () => {
+  // Ensure any started relayer is stopped to avoid hanging intervals
+  try {
+    if (lastRelayer) {
+      await lastRelayer.stop();
+      lastRelayer = null;
+    }
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 // Test setup function
@@ -60,7 +74,9 @@ function setupTest() {
   };
 
   // Initialize relayer with config
-  const relayer = new NearRelayer(config);
+  const relayer = new NearRelayer(config as any);
+  // Track for universal teardown
+  lastRelayer = relayer as any;
 
   return {
     relayer,
@@ -122,6 +138,7 @@ describe('NearRelayer', () => {
       const { relayer } = setupTest();
       await relayer.start();
       expect(relayer.isRelayerRunning()).toBe(true);
+      await relayer.stop();
     });
 
     test('should stop relayer successfully', async () => {
@@ -133,28 +150,20 @@ describe('NearRelayer', () => {
   });
 
   describe('Event Handling', () => {
-    test('should handle swap order created event', async () => {
-      const { relayer, config, mockNearProvider, mockEthereumSigner, mockEthereumProvider } = setupTest();
-
-      // Mock transaction receipt for Ethereum side
-      mockEthereumProvider.setMockTransactionReceipt({
-        status: 1,
-        transactionHash: '0x' + '1'.repeat(64),
-        blockNumber: 12345,
-        gasUsed: '100000'
-      });
-
+    test('should poll NEAR blocks and emit events', async () => {
+      const { relayer, config, mockNearProvider, mockEthereumSigner } = setupTest();
+      
       // Ensure listener starts from height 1000
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: 1000 } });
       await relayer.start();
-
+      
       const sendSpy = jest.spyOn(mockEthereumSigner as any, 'sendTransaction');
-
+      
       // Prepare NEAR provider mocks to include EVENT_JSON log for swap_order_created at next block
       const blockHeight = 1001;
       const chunkHash = `chunk-hash-${blockHeight}`;
-      const txHash = 'abcdEFGH1234567890abcdEFGH1234567890abcd';
-
+      const txHash = 'abcdEFGH1234567890abcdEFGH1234567890abc1';
+      
       mockNearProvider.setMockChunk(chunkHash, {
         transactions: [
           {
@@ -188,13 +197,13 @@ describe('NearRelayer', () => {
           },
         ],
       } as any);
-
+      
       // Advance status so poller processes new block
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: blockHeight } });
-
+      
       // Allow poller to run and process the block
       await new Promise((r) => setTimeout(r, 80));
-
+      
       expect(sendSpy).toHaveBeenCalledTimes(1);
     });
 
@@ -260,6 +269,7 @@ describe('NearRelayer', () => {
       await new Promise((r) => setTimeout(r, 80));
 
       expect(sendSpy).toHaveBeenCalledTimes(1);
+      await relayer.stop();
     });
   });
 
@@ -393,6 +403,7 @@ describe('NearRelayer', () => {
 
       // Verify the follow-up transaction was sent
       expect(sendSpy).toHaveBeenCalledTimes(2);
+      await relayer.stop();
     });
   });
 
@@ -440,6 +451,7 @@ describe('NearRelayer', () => {
       const { relayer } = setupTest();
       await relayer.start();
       expect(relayer.isRelayerRunning()).toBe(true);
+      await relayer.stop();
     });
 
     test('should stop relayer successfully', async () => {
@@ -458,6 +470,7 @@ describe('NearRelayer', () => {
       
       await relayer.start();
       expect(relayer.isRelayerRunning()).toBe(true);
+      await relayer.stop();
     });
   });
 
@@ -488,33 +501,32 @@ describe('NearRelayer', () => {
       
       expect(mockNearAccount.functionCall).toHaveBeenCalledWith(
         expect.objectContaining({
-          methodName: 'create_escrow',
+          methodName: 'create_swap_order',
           args: expect.objectContaining({
             recipient: 'test.near'
           })
         })
       );
+      await relayer.stop();
     });
 
     test('should process withdrawal message successfully', async () => {
-      const { relayer, mockEthereumProvider, mockNearAccount } = setupTest();
+      const { relayer, mockEthereumProvider, mockNearAccount, mockEthereumSigner } = setupTest();
       await relayer.start();
       
       const message: CrossChainMessage = {
-        messageId: 'test-swap-1',
-        type: MessageType.DEPOSIT,
+        messageId: 'test-withdraw-1',
+        type: MessageType.WITHDRAWAL,
         sourceChain: 'NEAR' as 'NEAR',
         destChain: 'ETH' as 'ETH',
         sender: 'sender.near',
         recipient: '0x1234567890123456789012345678901234567890',
-        amount: '1000000000000000000', // 1 NEAR
+        amount: '1000000000000000000',
         token: 'NEAR',
-        timestamp: Math.floor(Date.now() / 1000), // Convert to Unix timestamp
+        timestamp: Math.floor(Date.now() / 1000),
         data: {
-          // Add any additional data required for the deposit
-          secretHash: '0x' + '12'.repeat(32),
-          timelock: Math.floor(Date.now() / 1000) + 86400, // 24 hours from now
-          txHash: 'abcdEFGH1234567890abcdEFGH1234567890abc1' // NEAR tx hash format (no 0x)
+          secret: '12'.repeat(32),
+          txHash: 'abcdEFGH1234567890abcdEFGH1234567890abc1'
         }
       };
       
@@ -537,8 +549,10 @@ describe('NearRelayer', () => {
         status: 'active'
       });
       
+      const sendSpy = jest.spyOn(mockEthereumSigner as any, 'sendTransaction');
       await relayer.processMessage(message);
-      expect(mockEthereumProvider.call).toHaveBeenCalled();
+      expect(sendSpy).toHaveBeenCalled();
+      await relayer.stop();
     });
 
     test('should skip already processed messages', async () => {
@@ -555,7 +569,9 @@ describe('NearRelayer', () => {
         amount: '1000000000000000000',
         token: '0x0000000000000000000000000000000000000000',
         data: {
-          txHash: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890'
+          txHash: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+          secretHash: '0x' + '34'.repeat(32),
+          timelock: Math.floor(Date.now() / 1000) + 3600
         },
         timestamp: Date.now()
       };
@@ -564,6 +580,7 @@ describe('NearRelayer', () => {
       await relayer.processMessage(depositMessage);
       
       expect(relayer.getProcessedMessageCount()).toBe(1);
+      await relayer.stop();
     });
   });
 
@@ -628,6 +645,7 @@ describe('NearRelayer', () => {
 
       // Verify the transaction was sent via signer
       expect(sendSpy).toHaveBeenCalled();
+      await relayer.stop();
     });
   });
 });

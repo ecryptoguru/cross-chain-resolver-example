@@ -121,7 +121,9 @@ export class MockNearAccount extends EventEmitter {
     return (
       this.mockFunctionCallResult ?? {
         transaction: { hash: 'tx123' },
-        receipts_outcome: []
+        receipts_outcome: [],
+        // Provide a NEAR-like success status by default so services treat call as successful
+        status: { SuccessValue: '' }
       }
     );
   }
