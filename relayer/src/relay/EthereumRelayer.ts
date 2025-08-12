@@ -11,8 +11,10 @@ import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { withRetry } from '../utils/retry.js';
 import { DynamicAuctionService, CrossChainAuctionParams, AuctionConfig } from '../services/DynamicAuctionService.js';
 import { EthereumPartialFillService, PartialFillParams } from '../services/EthereumPartialFillService.js';
+import type { RetryOptions } from '../utils/retry.js';
 
 export interface EthereumRelayerConfig {
   provider: ethers.providers.JsonRpcProvider;
@@ -26,6 +28,15 @@ export interface EthereumRelayerConfig {
   storageDir?: string;
   // Optional auction configuration to pass into DynamicAuctionService when DI not provided
   auctionConfig?: AuctionConfig;
+  // New: concurrency control
+  concurrencyLimit?: number;
+  // New: retry policies per external call type
+  retry?: {
+    default?: RetryOptions;
+    factoryTx?: RetryOptions;
+    receipt?: RetryOptions;
+    nearCall?: RetryOptions;
+  };
 }
 
 export class EthereumRelayer implements IMessageProcessor {
@@ -37,6 +48,11 @@ export class EthereumRelayer implements IMessageProcessor {
   private readonly auctionService: DynamicAuctionService;
   private readonly partialFillService: EthereumPartialFillService;
   private processedMessages: Set<string> = new Set();
+  // In-flight idempotency and simple concurrency control
+  private inFlight: Set<string> = new Set();
+  private activeTasks = 0;
+  private readonly concurrencyLimit: number;
+  private queue: Array<() => void> = [];
   private orderStatusMap: Map<string, any> = new Map(); // For tracking order status
   private isRunning = false;
 
@@ -83,6 +99,28 @@ export class EthereumRelayer implements IMessageProcessor {
       eventHandlers,
       config.pollIntervalMs
     );
+
+    // Concurrency
+    this.concurrencyLimit = typeof config.concurrencyLimit === 'number' && config.concurrencyLimit > 0
+      ? Math.floor(config.concurrencyLimit)
+      : 5;
+  }
+
+  /**
+   * Run a task honoring the concurrency limit
+   */
+  private async runWithConcurrency<T>(task: () => Promise<T>): Promise<T> {
+    if (this.activeTasks >= this.concurrencyLimit) {
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    }
+    this.activeTasks++;
+    try {
+      return await task();
+    } finally {
+      this.activeTasks--;
+      const next = this.queue.shift();
+      if (next) next();
+    }
   }
 
   /**
@@ -162,51 +200,67 @@ export class EthereumRelayer implements IMessageProcessor {
    */
   async processMessage(message: DepositMessage | WithdrawalMessage | RefundMessage): Promise<void> {
     try {
-      // Validate message
-      this.validator.validateCrossChainMessage(message);
-
-      // Check if already processed
-      if (this.storage.isMessageProcessed(message.messageId)) {
-        logger.debug('Message already processed, skipping', { messageId: message.messageId });
+      // Basic idempotency: skip already processed or in-flight
+      const persistedStatus = this.storage.getMessageStatus?.(message.messageId);
+      if (this.processedMessages.has(message.messageId) || this.inFlight.has(message.messageId) || persistedStatus === 'succeeded') {
+        logger.debug('Skipping duplicate/in-flight message', { messageId: message.messageId });
         return;
       }
+      this.inFlight.add(message.messageId);
+      await this.storage.markMessageStarted?.(message.messageId);
 
-      logger.info('Processing cross-chain message', {
+      logger.info('Processing message', {
         messageId: message.messageId,
         type: message.type,
         sourceChain: message.sourceChain,
         destChain: message.destChain
       });
 
-      // Route message based on type
-      switch (message.type) {
-        case 'DEPOSIT':
-          await this.processDepositMessage(message as DepositMessage);
-          break;
-        case 'WITHDRAWAL':
-          await this.processWithdrawalMessage(message as WithdrawalMessage);
-          break;
-        case 'REFUND':
-          await this.processRefundMessage(message as RefundMessage);
-          break;
-        default:
-          throw new RelayerError(
-            `Unknown message type: ${(message as any).type}`,
-            'INVALID_MESSAGE_TYPE',
-            { messageId: message.messageId, type: (message as any).type }
-          );
-      }
+      await this.runWithConcurrency(async () => {
+        switch (message.type) {
+          case 'DEPOSIT':
+            await this.processDepositMessage(message as DepositMessage);
+            break;
+          case 'WITHDRAWAL':
+            await this.processWithdrawalMessage(message as WithdrawalMessage);
+            break;
+          case 'REFUND':
+            await this.processRefundMessage(message as RefundMessage);
+            break;
+          default:
+            throw ErrorHandler.createValidationError('message.type', (message as any).type, 'Unsupported message type');
+        }
+      });
 
       // Mark as processed
-      await this.storage.saveProcessedMessage(message.messageId);
+      this.processedMessages.add(message.messageId);
+      if (this.storage.markMessageSucceeded) {
+        await this.storage.markMessageSucceeded(message.messageId);
+      } else {
+        await this.storage.saveProcessedMessage(message.messageId);
+      }
 
-      logger.info('Message processed successfully', { messageId: message.messageId });
+      logger.info('Message processed successfully', {
+        messageId: message.messageId,
+        type: message.type
+      });
     } catch (error) {
+      // mark failed for crash resilience
+      if (this.storage.markMessageFailed) {
+        await this.storage.markMessageFailed(message.messageId, (error as Error)?.message);
+      }
       throw ErrorHandler.handleAndRethrow(
         error as Error,
         `Failed to process message: ${message.messageId}`,
-        { messageId: message.messageId, messageType: message.type }
+        {
+          type: message.type,
+          sourceChain: message.sourceChain,
+          destChain: message.destChain
+        }
       );
+    }
+    finally {
+      this.inFlight.delete(message.messageId);
     }
   }
 
@@ -405,32 +459,67 @@ export class EthereumRelayer implements IMessageProcessor {
 
       // Get current auction rate and output amount (use optional auction config overrides)
       const auctionResult = this.auctionService.calculateCurrentRate(auctionParams, this.config.auctionConfig);
-      
-      // Create escrow on Ethereum
-      const escrowTx = await this.contractService.executeFactoryTransaction(
-        'createEscrow',
-        [
-          message.recipient,  // recipient
-          message.data.secretHash, // hashlock
-          message.data.timelock,   // timelock (already in seconds)
-          11155111 // chainId (Sepolia testnet)
-        ],
-        ethers.utils.parseEther(auctionResult.totalCost)
+
+      // Compute precise ETH values using BigNumber to avoid precision loss
+      const ethAmountWei = ethers.utils.parseEther(auctionResult.outputAmount);
+      const safetyDepositWei = ethers.utils.parseEther(auctionResult.feeAmount);
+      const totalEthValueToSend = ethAmountWei.add(safetyDepositWei);
+
+      // Build factory immutables for createDstEscrow
+      const maker = await this.contractService.getSignerAddress();
+      const taker = message.recipient;
+      const token = ethers.constants.AddressZero; // Native ETH
+      const orderHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(message.data.txHash));
+      const timelocks = ethers.BigNumber.from(message.data.timelock);
+      const dstImmutables = [
+        orderHash,
+        message.data.secretHash,
+        maker,
+        taker,
+        token,
+        ethAmountWei,
+        safetyDepositWei,
+        timelocks
+      ];
+
+      // Source side cancellation timestamp (fallback to same timelock window)
+      const srcCancellationTimestamp = timelocks;
+
+      // Create destination escrow on Ethereum factory
+      const escrowTx = await withRetry(
+        () => this.contractService.executeFactoryTransaction(
+          'createDstEscrow',
+          [dstImmutables, srcCancellationTimestamp],
+          totalEthValueToSend
+        ),
+        this.config.retry?.factoryTx ?? this.config.retry?.default ?? {
+          retries: 3,
+          shouldRetry: (err) => {
+            const msg = (err as any)?.message || '';
+            return /UNPREDICTABLE_GAS_LIMIT|ETIMEOUT|temporar|rate limit|nonce|replacement|network/i.test(msg);
+          }
+        }
       );
 
       // Wait for transaction confirmation
-      const receipt = await escrowTx.wait();
+      const receipt = await withRetry(
+        () => escrowTx.wait(),
+        this.config.retry?.receipt ?? this.config.retry?.default ?? {
+          retries: 3,
+          shouldRetry: (err) => /timeout|ETIMEOUT|rpc/i.test((err as any)?.message || '')
+        }
+      );
       
       // Extract escrow address from event logs
       const escrowCreatedEvent = receipt.events?.find(
-        (e: any) => e.event === 'EscrowCreated'
+        (e: any) => e.event === 'DstEscrowCreated'
       );
       
       if (!escrowCreatedEvent) {
         throw new Error('EscrowCreated event not found in transaction receipt');
       }
 
-      const escrowAddress = escrowCreatedEvent.args?.escrowAddress;
+      const escrowAddress = escrowCreatedEvent.args?.escrow;
       
       // Update order status
       await this.updateOrderStatus(message.data.txHash, 'escrow_created', {
@@ -589,7 +678,7 @@ export class EthereumRelayer implements IMessageProcessor {
       });
 
       // Call NEAR contract to create escrow with relayer's NEAR liquidity
-      const result = await this.config.nearAccount.functionCall({
+      const result = await withRetry(() => this.config.nearAccount.functionCall({
         contractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
         methodName: 'create_swap_order',
         args: {
@@ -601,7 +690,7 @@ export class EthereumRelayer implements IMessageProcessor {
         },
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: nearAmountYocto.toBigInt() // Relayer provides NEAR liquidity
-      });
+      }), this.config.retry?.nearCall ?? this.config.retry?.default ?? { retries: 3, shouldRetry: () => true });
 
       logger.info('NEAR escrow created successfully for ETH→NEAR transfer', {
         ethereumSender,

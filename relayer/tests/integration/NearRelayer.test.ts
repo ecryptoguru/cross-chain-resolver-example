@@ -198,11 +198,14 @@ describe('NearRelayer', () => {
         ],
       } as any);
       
+      // Attach listener before advancing status to avoid race
+      const createdEvent = new Promise<any>((resolve) => {
+        (relayer as any).getEventEmitter().once('ethereum:tx:sent', (payload: any) => resolve(payload));
+      });
       // Advance status so poller processes new block
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: blockHeight } });
-      
-      // Allow poller to run and process the block
-      await new Promise((r) => setTimeout(r, 80));
+      const createdPayload = await createdEvent;
+      expect(createdPayload.action).toBe('create-escrow');
       
       expect(sendSpy).toHaveBeenCalledTimes(1);
     });
@@ -226,6 +229,14 @@ describe('NearRelayer', () => {
       await relayer.start();
 
       const sendSpy = jest.spyOn(mockEthereumSigner as any, 'sendTransaction');
+
+      // Ensure deterministic withdrawal receipt for emitted event
+      mockEthereumProvider.setMockTransactionReceipt({
+        status: 1,
+        transactionHash: '0x' + 'ab'.repeat(32),
+        blockNumber: 22222,
+        gasUsed: '21000'
+      });
 
       // Prepare NEAR provider mocks to include EVENT_JSON log for swap_order_completed at next block
       const blockHeight = 1002;
@@ -262,11 +273,17 @@ describe('NearRelayer', () => {
         ],
       } as any);
 
+      // Attach listener before advancing status to avoid race
+      const withdrawalEvent = new Promise<any>((resolve) => {
+        (relayer as any).getEventEmitter().once('ethereum:tx:sent', (payload: any) => resolve(payload));
+      });
       // Advance status so poller processes new block
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: blockHeight } });
-
-      // Allow poller to run and process the block
-      await new Promise((r) => setTimeout(r, 80));
+      const withdrawalPayload = await withdrawalEvent;
+      expect(withdrawalPayload.action).toBe('withdrawal');
+      // Deterministic payload checks
+      expect(withdrawalPayload.txHash).toBe('0x' + 'ab'.repeat(32));
+      expect(withdrawalPayload.escrowAddress).toBe('0x1234567890123456789012345678901234567890');
 
       expect(sendSpy).toHaveBeenCalledTimes(1);
       await relayer.stop();
@@ -345,8 +362,12 @@ describe('NearRelayer', () => {
       } as any);
 
       // Advance status so poller processes created block
+      const createdPromise = new Promise<any>((resolve) => {
+        (relayer as any).getEventEmitter().once('ethereum:tx:sent', (payload: any) => resolve(payload));
+      });
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: createdBlock } });
-      await new Promise((r) => setTimeout(r, 80));
+      const createPayload = await createdPromise;
+      expect(createPayload.action).toBe('create-escrow');
 
       // Verify the transaction was sent once for escrow creation
       expect(sendSpy).toHaveBeenCalledTimes(1);
@@ -397,9 +418,23 @@ describe('NearRelayer', () => {
         ],
       } as any);
 
+      // Ensure deterministic withdrawal receipt for emitted event in complete flow
+      mockEthereumProvider.setMockTransactionReceipt({
+        status: 1,
+        transactionHash: '0x' + 'cd'.repeat(32),
+        blockNumber: 33333,
+        gasUsed: '21000'
+      });
+
       // Advance status so poller processes completed block
+      const withdrawalPromise = new Promise<any>((resolve) => {
+        (relayer as any).getEventEmitter().once('ethereum:tx:sent', (payload: any) => resolve(payload));
+      });
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: completedBlock } });
-      await new Promise((r) => setTimeout(r, 80));
+      const wdPayload = await withdrawalPromise;
+      expect(wdPayload.action).toBe('withdrawal');
+      // Deterministic payload checks
+      expect(wdPayload.txHash).toBe('0x' + 'cd'.repeat(32));
 
       // Verify the follow-up transaction was sent
       expect(sendSpy).toHaveBeenCalledTimes(2);
@@ -511,7 +546,7 @@ describe('NearRelayer', () => {
     });
 
     test('should process withdrawal message successfully', async () => {
-      const { relayer, mockEthereumProvider, mockNearAccount, mockEthereumSigner } = setupTest();
+      const { relayer, mockEthereumProvider, mockNearProvider, mockEthereumSigner } = setupTest();
       await relayer.start();
       
       const message: CrossChainMessage = {
@@ -530,7 +565,9 @@ describe('NearRelayer', () => {
         }
       };
       
-      mockNearAccount.setMockViewFunctionResult({
+      // Mock NEAR provider call_function result for find_escrow_by_secret_hash
+      mockNearProvider.setMockCallFunctionResult('find_escrow_by_secret_hash', {
+        id: 'test-order-1',
         initiator: 'test.near',
         recipient: '0x1234567890123456789012345678901234567890',
         amount: '1000000000000000000',
@@ -640,8 +677,12 @@ describe('NearRelayer', () => {
         ],
       } as any);
 
+      const createdEvent = new Promise<any>((resolve) => {
+        (relayer as any).getEventEmitter().once('ethereum:tx:sent', (payload: any) => resolve(payload));
+      });
       mockNearProvider.setMockStatus({ sync_info: { latest_block_height: blockHeight } });
-      await new Promise((r) => setTimeout(r, 80));
+      const createdPayload2 = await createdEvent;
+      expect(createdPayload2.action).toBe('create-escrow');
 
       // Verify the transaction was sent via signer
       expect(sendSpy).toHaveBeenCalled();

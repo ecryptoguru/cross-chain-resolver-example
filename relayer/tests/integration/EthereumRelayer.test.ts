@@ -132,7 +132,7 @@ describe('EthereumRelayer - Integration', () => {
         wait: async () => ({
           transactionHash: '0x' + '1'.repeat(64),
           events: [
-            { event: 'EscrowCreated', args: { escrowAddress: '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD' } },
+            { event: 'DstEscrowCreated', args: { escrow: '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD' } },
           ],
         }),
       } as any);
@@ -231,7 +231,7 @@ describe('EthereumRelayer - Integration', () => {
         wait: async () => ({
           transactionHash: '0x' + '2'.repeat(64),
           events: [
-            { event: 'EscrowCreated', args: { escrowAddress: '0x' + 'a'.repeat(40) } },
+            { event: 'DstEscrowCreated', args: { escrow: '0x' + 'a'.repeat(40) } },
           ],
         }),
       } as any);
@@ -267,5 +267,103 @@ describe('EthereumRelayer - Integration', () => {
       await relayer.stop();
       expect(relayer.isRelayerRunning()).toBe(false);
     }
+  });
+
+  it('handles very small ETH amounts precisely (auction output + safety deposit)', async () => {
+    // Build a relayer with an injected auction service returning tiny amounts
+    const provider = new MockProvider();
+    const signer = new MockJsonRpcSigner(provider, '0xF39Fd6e51aad88F6F4ce6aB8827279cffFb92266');
+    (signer as any).provider = provider;
+    const nearAccount = new MockNearAccount('relayer.near');
+
+    const fakeAuction = {
+      calculateCurrentRate: () => ({
+        outputAmount: '0.00001006',
+        feeAmount: '0.0000001006',
+        totalCost: '0.0000101606',
+        currentRate: 0.0,
+        timeRemaining: 180,
+      }),
+    } as any;
+
+    const { EthereumRelayer } = require('../../src/relay/EthereumRelayer');
+    const relayer = new EthereumRelayer({
+      provider: provider as unknown as ethers.providers.JsonRpcProvider,
+      signer: signer as unknown as ethers.Signer,
+      nearAccount: nearAccount as any,
+      factoryAddress: '0x1111111111111111111111111111111111111111',
+      bridgeAddress: '0x2222222222222222222222222222222222222222',
+      resolverAddress: '0x3333333333333333333333333333333333333333',
+      resolverAbi: [],
+    } as any, { auctionService: fakeAuction });
+
+    const execSpy = jest
+      .spyOn(EthereumContractService.prototype, 'executeFactoryTransaction')
+      .mockImplementation(async (_method: string, _params: any[], value?: ethers.BigNumber) => {
+        // expected precise sum of auction output + fee
+        const expected = ethers.utils.parseEther('0.00001006').add(
+          ethers.utils.parseEther('0.0000001006')
+        );
+        expect(value?.toString()).toBe(expected.toString());
+        return {
+          wait: async () => ({
+            transactionHash: '0x' + '3'.repeat(64),
+            events: [
+              { event: 'DstEscrowCreated', args: { escrow: '0x' + 'b'.repeat(40) } },
+            ],
+          }),
+        } as any;
+      });
+
+    const msg: DepositMessage = {
+      type: MessageType.DEPOSIT,
+      messageId: 'message_small',
+      sourceChain: 'NEAR',
+      destChain: 'ETH',
+      sender: 'alice.near',
+      recipient: '0x2222222222222222222222222222222222222222',
+      amount: '1000', // not used by fake auction; present for validation
+      token: ZERO_ADDR,
+      secretHash: '0x' + '4'.repeat(64),
+      timelock: Math.floor(Date.now() / 1000) + 3600,
+      data: {
+        txHash: 'NEARtxHashSMALL'.padEnd(32, 'S'),
+        secretHash: '0x' + '4'.repeat(64),
+        timelock: Math.floor(Date.now() / 1000) + 3600,
+      },
+      timestamp: Date.now(),
+    };
+
+    await relayer.processMessage(msg);
+    expect(execSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects withdrawal when timelock not yet expired (error normalization)', async () => {
+    const { relayer } = setupTest();
+
+    jest
+      .spyOn(EthereumContractService.prototype, 'findEscrowByParams')
+      .mockResolvedValue({ escrowAddress: '0xEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeE' } as any);
+
+    const err = new Error('Refund not available yet. Timelock expires in 120 seconds');
+    jest
+      .spyOn(EthereumContractService.prototype, 'executeWithdrawal')
+      .mockRejectedValue(err);
+
+    const msg: WithdrawalMessage = {
+      type: MessageType.WITHDRAWAL,
+      messageId: 'message_wd_early',
+      sourceChain: 'ETH',
+      destChain: 'NEAR',
+      sender: '0x3333333333333333333333333333333333333333',
+      recipient: 'bob.near',
+      amount: '500000000000000000',
+      token: ZERO_ADDR,
+      data: { txHash: '0x' + '9'.repeat(64) },
+      secret: '0x' + '6'.repeat(64),
+      timestamp: Date.now(),
+    };
+
+    await expect(relayer.processMessage(msg)).rejects.toThrow('Failed to process message');
   });
 });

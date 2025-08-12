@@ -418,17 +418,6 @@ export class EthereumContractService implements IContractService {
         );
       }
 
-      // Check if timelock has expired
-      const currentTime = Math.floor(Date.now() / 1000);
-      if (details.timelock > currentTime) {
-        throw new ContractError(
-          `Withdrawal timelock not expired. Available in ${details.timelock - currentTime} seconds`,
-          escrowAddress,
-          'withdraw',
-          { timelock: details.timelock, currentTime }
-        );
-      }
-
       // Execute withdrawal
       const escrowContract = new ethers.Contract(escrowAddress, EscrowABI, this.signer);
       

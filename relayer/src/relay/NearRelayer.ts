@@ -15,6 +15,7 @@ import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { NearPartialFillService } from '../services/NearPartialFillService.js';
+import { EventEmitter } from 'events';
 
 export interface NearRelayerConfig {
   nearAccount: NearAccount;
@@ -41,6 +42,7 @@ export class NearRelayer implements IMessageProcessor {
   private readonly storage: StorageService;
   private readonly validator: ValidationService;
   private readonly partialFillService: NearPartialFillService;
+  private readonly emitter: EventEmitter = new EventEmitter();
   private processedMessages: Set<string> = new Set();
   private isRunning = false;
   private orderStatusMap: Map<string, {
@@ -96,6 +98,14 @@ export class NearRelayer implements IMessageProcessor {
       eventHandlers,
       config.pollIntervalMs
     );
+  }
+
+  /**
+   * Expose an EventEmitter to allow external consumers (e.g., tests) to subscribe
+   * to relayer lifecycle events.
+   */
+  public getEventEmitter(): EventEmitter {
+    return this.emitter;
   }
 
   /**
@@ -391,8 +401,8 @@ export class NearRelayer implements IMessageProcessor {
       });
 
       // Find the corresponding NEAR escrow and complete it
-      const secret = message.data.secret;
-      if (!secret) {
+      const rawSecret = message.data.secret;
+      if (!rawSecret) {
         throw new RelayerError(
           'Missing secret for withdrawal message',
           'MISSING_SECRET',
@@ -400,8 +410,10 @@ export class NearRelayer implements IMessageProcessor {
         );
       }
 
-      // Calculate secret hash to find the order
-      const secretHash = ethers.utils.keccak256('0x' + secret);
+      // Normalize secret: ensure no leading 0x for consistent raw-bytes hashing
+      const normalizedSecret = rawSecret.startsWith('0x') ? rawSecret.slice(2) : rawSecret;
+      // Calculate secret hash to find the order (raw bytes)
+      const secretHash = ethers.utils.keccak256('0x' + normalizedSecret);
       
       // For now, we'll need to implement a way to find orders by secret hash
       // This is a simplified approach - in production, you'd want a more efficient lookup
@@ -416,7 +428,7 @@ export class NearRelayer implements IMessageProcessor {
       }
 
       // Complete the swap order
-      await this.contractService.completeSwapOrder(orderId, secret);
+      await this.contractService.completeSwapOrder(orderId, normalizedSecret);
 
       logger.info('Withdrawal message processed successfully', {
         messageId: message.messageId,
@@ -849,6 +861,15 @@ export class NearRelayer implements IMessageProcessor {
       // Use EthereumContractService to execute withdrawal
       const receipt = await this.ethereumContractService.executeWithdrawal(escrowAddress, secret);
       
+      // Emit event after successful withdrawal execution (receipt available)
+      this.emitter.emit('ethereum:tx:sent', {
+        action: 'withdrawal',
+        chain: 'ETH',
+        txHash: receipt.transactionHash,
+        escrowAddress,
+        amount
+      });
+      
       logger.info('Ethereum withdrawal executed successfully', {
         escrowAddress,
         txHash: receipt.transactionHash,
@@ -1033,6 +1054,17 @@ export class NearRelayer implements IMessageProcessor {
     totalEthValueToSend // Send exact BigNumber sum: safetyDeposit + amount
   );
 
+      // Emit event immediately after tx is sent for deterministic synchronization
+      this.emitter.emit('ethereum:tx:sent', {
+        action: 'create-escrow',
+        chain: 'ETH',
+        txHash: result.hash,
+        orderId: event.orderId,
+        secretHash: event.secretHash,
+        recipient: event.recipient,
+        amount: immutables.amount
+      });
+
       const receipt = await result.wait();
       // Extract escrow address from event logs
       let escrowAddress = '';
@@ -1166,9 +1198,21 @@ export class NearRelayer implements IMessageProcessor {
 
   private async findOrderBySecretHash(secretHash: string): Promise<string | null> {
     try {
-      // This is a placeholder implementation
-      // In production, you'd want to maintain an index of orders by secret hash
+      // Validate input and query NEAR contract for escrow by secret hash
+      this.validator.validateSecretHash(secretHash);
+
       logger.debug('Finding NEAR order by secret hash', { secretHash });
+
+      const escrow = await this.contractService.findEscrowBySecretHash(secretHash);
+      if (escrow && escrow.id) {
+        logger.info('Found NEAR order by secret hash', {
+          secretHash,
+          orderId: escrow.id
+        });
+        return escrow.id;
+      }
+
+      logger.debug('No NEAR order found for secret hash', { secretHash });
       return null;
     } catch (error) {
       logger.error('Failed to find order by secret hash', {

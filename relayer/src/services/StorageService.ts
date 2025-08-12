@@ -14,6 +14,9 @@ export class StorageService implements IStorageService {
   private readonly storageDir: string;
   private readonly filename: string;
   private isInitialized = false;
+  // New: message status map for crash-resilient idempotency
+  private messageStatus: Map<string, { status: 'started' | 'succeeded' | 'failed'; updatedAt: number; error?: string }>
+    = new Map();
 
   constructor(storageDir: string = 'storage', filename: string = 'processed_messages.json') {
     this.storageDir = this.validateAndNormalizePath(storageDir);
@@ -60,6 +63,39 @@ export class StorageService implements IStorageService {
     }
   }
 
+  // New: mark message lifecycle status
+  async markMessageStarted(messageId: string): Promise<void> {
+    this.validateMessageId(messageId);
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+    this.messageStatus.set(messageId, { status: 'started', updatedAt: Date.now() });
+    await this.persistToFile();
+  }
+
+  async markMessageSucceeded(messageId: string): Promise<void> {
+    this.validateMessageId(messageId);
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+    this.processedMessages.add(messageId);
+    this.messageStatus.set(messageId, { status: 'succeeded', updatedAt: Date.now() });
+    await this.persistToFile();
+  }
+
+  async markMessageFailed(messageId: string, error?: string): Promise<void> {
+    this.validateMessageId(messageId);
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+    this.messageStatus.set(messageId, { status: 'failed', updatedAt: Date.now(), error });
+    await this.persistToFile();
+  }
+
+  getMessageStatus(messageId: string): 'started' | 'succeeded' | 'failed' | undefined {
+    return this.messageStatus.get(messageId)?.status;
+  }
+
   /**
    * Save a processed message to persistent storage
    */
@@ -73,6 +109,9 @@ export class StorageService implements IStorageService {
 
       // Add to in-memory set first
       this.processedMessages.add(messageId);
+
+      // Also track status as succeeded
+      this.messageStatus.set(messageId, { status: 'succeeded', updatedAt: Date.now() });
 
       // Persist to file
       await this.persistToFile();
@@ -104,38 +143,68 @@ export class StorageService implements IStorageService {
           return this.processedMessages;
         }
 
-        const messages = JSON.parse(data);
+        const parsed = JSON.parse(data);
 
-        if (!Array.isArray(messages)) {
-          throw new StorageError(
-            'Invalid storage format: expected array',
-            'load',
+        // Backward compatibility:
+        // v1 format: ["msg1", "msg2", ...]
+        // v2 format: { version: 2, messages: { [id]: { status, updatedAt, error? } } }
+        if (Array.isArray(parsed)) {
+          let validMessages = 0;
+          parsed.forEach((messageId: unknown) => {
+            if (typeof messageId === 'string' && messageId.trim()) {
+              try {
+                this.validateMessageId(messageId);
+                this.processedMessages.add(messageId);
+                this.messageStatus.set(messageId, { status: 'succeeded', updatedAt: Date.now() });
+                validMessages++;
+              } catch (error) {
+                logger.warn('Skipping invalid message ID from storage', { 
+                  messageId, 
+                  error: error instanceof Error ? error.message : String(error) 
+                });
+              }
+            }
+          });
+          logger.info('Loaded processed messages (v1 format)', {
             filePath,
-            { actualType: typeof messages }
-          );
-        }
-
-        // Validate and load messages
-        let validMessages = 0;
-        messages.forEach((messageId: unknown) => {
-          if (typeof messageId === 'string' && messageId.trim()) {
+            messageCount: validMessages
+          });
+        } else if (parsed && typeof parsed === 'object' && parsed.messages && typeof parsed.messages === 'object') {
+          const entries = Object.entries(parsed.messages as Record<string, { status: string; updatedAt: number; error?: string }>)
+            .filter(([id]) => typeof id === 'string' && id.trim());
+          let loaded = 0;
+          for (const [id, info] of entries) {
             try {
-              this.validateMessageId(messageId);
-              this.processedMessages.add(messageId);
-              validMessages++;
-            } catch (error) {
-              logger.warn('Skipping invalid message ID from storage', { 
-                messageId, 
-                error: error instanceof Error ? error.message : String(error) 
+              this.validateMessageId(id);
+              if (info?.status === 'succeeded') {
+                this.processedMessages.add(id);
+              }
+              const normalizedStatus = (info?.status === 'started' || info?.status === 'failed' || info?.status === 'succeeded')
+                ? info.status as 'started' | 'failed' | 'succeeded' : 'started';
+              this.messageStatus.set(id, { status: normalizedStatus, updatedAt: info?.updatedAt || Date.now(), error: info?.error });
+              loaded++;
+            } catch (err) {
+              logger.warn('Skipping invalid message entry from storage', {
+                id,
+                error: err instanceof Error ? err.message : String(err)
               });
             }
           }
-        });
+          logger.info('Loaded processed messages (v2 format)', { filePath, messageCount: loaded });
+        } else {
+          throw new StorageError(
+            'Invalid storage format: expected array or object with messages',
+            'load',
+            filePath,
+            { actualType: typeof parsed }
+          );
+        }
 
+        const total = this.messageStatus.size || this.processedMessages.size;
+        const succeeded = this.processedMessages.size;
         logger.info('Loaded processed messages from storage', {
-          totalMessages: messages.length,
-          validMessages,
-          skippedMessages: messages.length - validMessages
+          totalMessages: total,
+          succeeded
         });
 
         return this.processedMessages;
@@ -405,8 +474,13 @@ export class StorageService implements IStorageService {
         throw new Error(`No write permission in directory: ${this.storageDir}. ${permError instanceof Error ? permError.message : String(permError)}`);
       }
 
+      // Build v2 payload with statuses; include v1 for backward tools if needed later
+      const statusObject: Record<string, { status: string; updatedAt: number; error?: string }> = {};
+      this.messageStatus.forEach((info, id) => { statusObject[id] = info; });
+      const payload = { version: 2, messages: statusObject };
+
       // Write to temporary file first (atomic operation)
-      const data = JSON.stringify(messages, null, 2);
+      const data = JSON.stringify(payload, null, 2);
       logger.debug('Writing to temporary file', { tempFile, dataLength: data.length });
       
       await fs.writeFile(tempFile, data, 'utf8');
