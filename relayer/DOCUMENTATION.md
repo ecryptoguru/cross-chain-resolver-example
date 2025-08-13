@@ -277,22 +277,91 @@ const pricing = await auctionService.calculateAuctionPricing({
 ```bash
 # NEAR Configuration
 NEAR_NETWORK_ID=testnet
-NEAR_ACCOUNT_ID=your-account.testnet
-NEAR_PRIVATE_KEY=ed25519:...
-NEAR_RPC_URL=https://rpc.testnet.near.org
+NEAR_NODE_URL=https://rpc.testnet.near.org
+NEAR_RELAYER_ACCOUNT_ID=relayer.testnet
+NEAR_RELAYER_PRIVATE_KEY=ed25519:...
+# NEAR escrow contract handling swap orders
+NEAR_ESCROW_CONTRACT_ID=escrow.yourproject.testnet
+
+# (Legacy override support via ConfigurationService; prefer NEAR_RELAYER_* above)
+# NEAR_ACCOUNT_ID=
+# NEAR_PRIVATE_KEY=
 
 # Ethereum Configuration
 ETHEREUM_RPC_URL=https://sepolia.infura.io/v3/...
+ETHEREUM_CHAIN_ID=11155111
 ETHEREUM_PRIVATE_KEY=0x...
-ETHEREUM_FACTORY_ADDRESS=0x...
-ETHEREUM_BRIDGE_ADDRESS=0x...
-ETHEREUM_RESOLVER_ADDRESS=0x...
+# Deprecated but temporarily supported. Prefer ETHEREUM_PRIVATE_KEY
+# DEPLOYER_PRIVATE_KEY=
 
-# Relayer Configuration
-POLL_INTERVAL_MS=5000
+# Deployed contract addresses
+ETHEREUM_ESCROW_FACTORY_ADDRESS=0x...
+ETHEREUM_BRIDGE_ADDRESS=0x...
+# Optional: defaults to ETHEREUM_ESCROW_FACTORY_ADDRESS if not set
+RESOLVER_ADDRESS=0x...
+
+# (Legacy keys still parsed by ConfigurationService; prefer the above)
+# ETHEREUM_ESCROW_CONTRACT=
+# ETHEREUM_BRIDGE_CONTRACT=
+
+# Relayer Runtime
+RELAYER_POLL_INTERVAL=5000
+# Legacy name used in config loader (won't affect src/index.ts runtime polling)
+# POLLING_INTERVAL=5000
+# Storage directory for persistent data
 STORAGE_DIR=./storage
+# Logging
 LOG_LEVEL=info
+# Enable file logs (rotating files) unless set to 'false'
+ENABLE_FILE_LOGS=true
+# Process control
+RELAYER_AUTO_START=true
+NODE_ENV=development
+PORT=3000
+
+# Note on metrics exposure:
+# - There is NO METRICS_PORT environment variable.
+# - Metrics are controlled via config file (see `config/config.<env>.json`):
+#     relayer.enableMetrics (boolean) and relayer.metricsPort (number).
+# - Defaults when no config file is found: metrics are enabled and served on the
+#   main PORT.
+# - When a config file is present:
+#     * If enableMetrics=true and metricsPort !== PORT, a dedicated metrics server
+#       runs on metricsPort.
+#     * If enableMetrics=true and metricsPort === PORT, /metrics is served on the
+#       main PORT.
+#     * If enableMetrics=false, metrics are disabled.
+# See `relayer/src/server.ts` for the authoritative behavior.
+
+# Price Oracle (optional overrides)
+# Expressed as: 1 <FROM> = <rate> <TO>
+EXCHANGE_RATE_NEAR_TO_ETH=0.001006
+# EXCHANGE_RATE_ETH_TO_NEAR=1000
+
+# Dynamic Auction (optional)
+AUCTION_DURATION=180
+AUCTION_INITIAL_RATE_BUMP=60000
+AUCTION_POINTS=[{"delay":0,"coefficient":60000},{"delay":60,"coefficient":30000},{"delay":180,"coefficient":0}]
+AUCTION_GAS_BUMP_ESTIMATE=100000
+AUCTION_GAS_PRICE_ESTIMATE=15
+AUCTION_MIN_FILL_PERCENTAGE=0.1
+AUCTION_MAX_RATE_BUMP=80000
 ```
+
+#### Legacy Environment Keys and Migration
+
+- Use these new keys; legacy keys remain temporarily supported by `ConfigurationService`:
+  - `DEPLOYER_PRIVATE_KEY` → `ETHEREUM_PRIVATE_KEY`
+  - `ETHEREUM_ESCROW_CONTRACT` → `ETHEREUM_ESCROW_FACTORY_ADDRESS`
+  - `ETHEREUM_BRIDGE_CONTRACT` → `ETHEREUM_BRIDGE_ADDRESS`
+  - `POLLING_INTERVAL` → `RELAYER_POLL_INTERVAL`
+  - `NEAR_ACCOUNT_ID` / `NEAR_PRIVATE_KEY` → `NEAR_RELAYER_ACCOUNT_ID` / `NEAR_RELAYER_PRIVATE_KEY`
+- Notes:
+  - `RESOLVER_ADDRESS` defaults to `ETHEREUM_ESCROW_FACTORY_ADDRESS` if unset.
+  - `AUCTION_POINTS` must be valid JSON; if your env parser strips characters, wrap the JSON in single quotes.
+  - Booleans are strings: set `ENABLE_FILE_LOGS` to `true` or `false`.
+
+See [Monitoring](#monitoring) for `/health` and `/metrics` endpoints to verify configuration at runtime.
 
 ### Configuration Files
 - `config/config.test.json`: Test environment configuration
@@ -432,6 +501,18 @@ order.refunded            # Order refunded
 - Check fill amounts and limits
 - Review order state consistency
 - Validate cross-chain coordination
+
+#### Environment Misconfiguration
+**Problem**: Relayer fails to start or behaves unexpectedly due to missing/invalid env vars
+**Solution**:
+- Ensure `.env` is present at `relayer/.env` and loaded (we use `dotenv`).
+- Verify required keys: `ETHEREUM_RPC_URL`, `ETHEREUM_CHAIN_ID`, `ETHEREUM_PRIVATE_KEY`, `ETHEREUM_ESCROW_FACTORY_ADDRESS`, `NEAR_NODE_URL`, `NEAR_RELAYER_ACCOUNT_ID`, `NEAR_RELAYER_PRIVATE_KEY`, `NEAR_ESCROW_CONTRACT_ID`.
+- Check types:
+  - Numbers: `RELAYER_POLL_INTERVAL`, `ETHEREUM_CHAIN_ID`, `AUCTION_DURATION`, `AUCTION_INITIAL_RATE_BUMP`, `AUCTION_GAS_*`.
+  - JSON: `AUCTION_POINTS` must be valid JSON array.
+  - Booleans: `ENABLE_FILE_LOGS`, `RELAYER_AUTO_START` should be `true` or `false`.
+- Legacy keys are parsed but prefer new keys (see Legacy section above).
+- Run with `LOG_LEVEL=debug` and inspect startup logs for config validation errors from `ConfigurationService`.
 
 ### Debug Mode
 Enable debug logging:

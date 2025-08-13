@@ -1,9 +1,9 @@
 import { jest } from '@jest/globals';
-import { NearPartialFillService } from '../../../src/services/NearPartialFillService.js';
-import { logger } from '../../../src/utils/logger.js';
+import { NearPartialFillService } from '../../../src/services/NearPartialFillService';
+import { logger } from '../../../src/utils/logger';
 
 // Mock logger to prevent console output during tests
-jest.mock('../../../src/utils/logger.js', () => ({
+jest.mock('../../../src/utils/logger', () => ({
   logger: {
     info: jest.fn(),
     error: jest.fn(),
@@ -14,6 +14,7 @@ jest.mock('../../../src/utils/logger.js', () => ({
 describe('NearPartialFillService', () => {
   let service: NearPartialFillService;
   let mockNearAccount: any;
+  let mockProvider: any;
   const contractId = 'test-contract.testnet';
   
   // Sample order data for testing
@@ -26,22 +27,36 @@ describe('NearPartialFillService', () => {
     // Reset all mocks before each test
     jest.clearAllMocks();
     
+    // Create typed mocks to avoid TS 'never' inference issues
+    const functionCall = jest.fn() as jest.MockedFunction<(args: any) => Promise<any>>;
+    functionCall.mockResolvedValue({} as any);
+    const viewFunction = jest.fn() as jest.MockedFunction<(args: any) => Promise<any>>;
+
     // Create a mock NEAR account
     mockNearAccount = {
-      functionCall: jest.fn().mockResolvedValue({}),
-      viewFunction: jest.fn().mockResolvedValue({
-        filled_amount: '500000000000000000', // 0.5 NEAR filled
-        remaining_amount: '500000000000000000', // 0.5 NEAR remaining
-        fill_count: 1,
-        is_fully_filled: false,
-        is_cancelled: false,
-        last_fill_timestamp: Math.floor(Date.now() / 1000),
-        child_orders: [],
-      }),
+      functionCall,
+      viewFunction,
     };
+
+    // Create a mock provider used by the service for view calls
+    const callFunction = jest.fn() as jest.MockedFunction<(
+      contractId: string,
+      methodName: string,
+      args: any
+    ) => Promise<any>>;
+    callFunction.mockResolvedValue({
+      filled_amount: '500000000000000000', // 0.5 NEAR filled
+      remaining_amount: '500000000000000000', // 0.5 NEAR remaining
+      fill_count: 1,
+      is_fully_filled: false,
+      is_cancelled: false,
+      last_fill_timestamp: Math.floor(Date.now() / 1000),
+      child_orders: [],
+    } as any);
+    mockProvider = { callFunction };
     
     // Initialize the service with the mock account
-    service = new NearPartialFillService(mockNearAccount, contractId);
+    service = new NearPartialFillService(mockNearAccount, mockProvider, contractId);
   });
   
   describe('processPartialFill', () => {
@@ -67,7 +82,8 @@ describe('NearPartialFillService', () => {
           min_fill_percent: 10,
           max_fills: 10,
         },
-        gas: '300000000000000',
+        gas: 300000000000000n,
+        attachedDeposit: 0n,
       });
       expect(logger.info).toHaveBeenCalledWith(
         `Processing partial fill for order ${sampleOrderId}`,
@@ -78,7 +94,7 @@ describe('NearPartialFillService', () => {
     it('should throw an error if the contract call fails', async () => {
       // Arrange
       const error = new Error('Contract call failed');
-      mockNearAccount.functionCall.mockRejectedValueOnce(error);
+      mockNearAccount.functionCall.mockRejectedValue(error);
       
       // Act & Assert
       await expect(
@@ -116,7 +132,8 @@ describe('NearPartialFillService', () => {
           order_id: sampleOrderId,
           amounts,
         },
-        gas: '300000000000000',
+        gas: 300000000000000n,
+        attachedDeposit: 0n,
       });
     });
   });
@@ -135,7 +152,8 @@ describe('NearPartialFillService', () => {
           order_id: sampleOrderId,
           recipient: sampleRecipient,
         },
-        gas: '200000000000000',
+        gas: 200000000000000n,
+        attachedDeposit: 0n,
       });
     });
   });
@@ -156,11 +174,11 @@ describe('NearPartialFillService', () => {
         childOrders: [],
       });
       
-      expect(mockNearAccount.viewFunction).toHaveBeenCalledWith({
+      expect(mockProvider.callFunction).toHaveBeenCalledWith(
         contractId,
-        methodName: 'get_order_state',
-        args: { order_id: sampleOrderId },
-      });
+        'get_order_state',
+        { order_id: sampleOrderId }
+      );
     });
   });
   
@@ -178,7 +196,7 @@ describe('NearPartialFillService', () => {
     
     it('should return false if the order is already fully filled', async () => {
       // Arrange
-      mockNearAccount.viewFunction.mockResolvedValueOnce({
+      mockProvider.callFunction.mockResolvedValueOnce({
         filled_amount: '1000000000000000000', // 1 NEAR filled
         remaining_amount: '0', // 0 NEAR remaining
         fill_count: 1,

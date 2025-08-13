@@ -15,16 +15,24 @@ import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { NearPartialFillService } from '../services/NearPartialFillService.js';
+import { EventEmitter } from 'events';
+import { withRetry } from '../utils/retry.js';
 
 export interface NearRelayerConfig {
   nearAccount: NearAccount;
   ethereum: {
     rpcUrl: string;
     privateKey: string;
+    /** Optional injected provider for testing */
+    provider?: ethers.providers.JsonRpcProvider;
+    /** Optional injected signer for testing */
+    signer?: ethers.Signer;
   };
   ethereumEscrowFactoryAddress: string;
   escrowContractId: string;
   pollIntervalMs?: number;
+  /** Optional explicit starting block for NearEventListener (inclusive) */
+  startBlock?: number;
   storageDir?: string;
 }
 
@@ -37,6 +45,7 @@ export class NearRelayer implements IMessageProcessor {
   private readonly storage: StorageService;
   private readonly validator: ValidationService;
   private readonly partialFillService: NearPartialFillService;
+  private readonly emitter: EventEmitter = new EventEmitter();
   private processedMessages: Set<string> = new Set();
   private isRunning = false;
   private orderStatusMap: Map<string, {
@@ -67,8 +76,9 @@ export class NearRelayer implements IMessageProcessor {
       nearProvider,
       config.escrowContractId
     );
-    const ethereumProvider = new ethers.providers.JsonRpcProvider(config.ethereum.rpcUrl);
-    const ethereumSigner = new ethers.Wallet(config.ethereum.privateKey, ethereumProvider);
+    // Allow tests to inject mocked provider/signer
+    const ethereumProvider = config.ethereum.provider ?? new ethers.providers.JsonRpcProvider(config.ethereum.rpcUrl);
+    const ethereumSigner = config.ethereum.signer ?? new ethers.Wallet(config.ethereum.privateKey, ethereumProvider);
     this.ethereumContractService = new EthereumContractService(
       ethereumProvider,
       ethereumSigner,
@@ -89,8 +99,16 @@ export class NearRelayer implements IMessageProcessor {
       config.nearAccount.connection.provider,
       config.escrowContractId,
       eventHandlers,
-      config.pollIntervalMs
+      { pollIntervalMs: config.pollIntervalMs, startBlock: config.startBlock }
     );
+  }
+
+  /**
+   * Expose an EventEmitter to allow external consumers (e.g., tests) to subscribe
+   * to relayer lifecycle events.
+   */
+  public getEventEmitter(): EventEmitter {
+    return this.emitter;
   }
 
   /**
@@ -386,8 +404,8 @@ export class NearRelayer implements IMessageProcessor {
       });
 
       // Find the corresponding NEAR escrow and complete it
-      const secret = message.data.secret;
-      if (!secret) {
+      const rawSecret = message.data.secret;
+      if (!rawSecret) {
         throw new RelayerError(
           'Missing secret for withdrawal message',
           'MISSING_SECRET',
@@ -395,8 +413,10 @@ export class NearRelayer implements IMessageProcessor {
         );
       }
 
-      // Calculate secret hash to find the order
-      const secretHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(secret));
+      // Normalize secret: ensure no leading 0x for consistent raw-bytes hashing
+      const normalizedSecret = rawSecret.startsWith('0x') ? rawSecret.slice(2) : rawSecret;
+      // Calculate secret hash to find the order (raw bytes)
+      const secretHash = ethers.utils.keccak256('0x' + normalizedSecret);
       
       // For now, we'll need to implement a way to find orders by secret hash
       // This is a simplified approach - in production, you'd want a more efficient lookup
@@ -411,7 +431,18 @@ export class NearRelayer implements IMessageProcessor {
       }
 
       // Complete the swap order
-      await this.contractService.completeSwapOrder(orderId, secret);
+      await this.contractService.completeSwapOrder(orderId, normalizedSecret);
+
+      // Also execute the corresponding Ethereum withdrawal if an escrow exists
+      const escrowAddress = await this.findEthereumEscrowBySecretHash(secretHash);
+      if (escrowAddress) {
+        await this.executeEthereumWithdrawal(escrowAddress, normalizedSecret, message.amount);
+      } else {
+        logger.warn('No Ethereum escrow found for secret hash during withdrawal processing', {
+          messageId: message.messageId,
+          secretHash
+        });
+      }
 
       logger.info('Withdrawal message processed successfully', {
         messageId: message.messageId,
@@ -664,16 +695,16 @@ export class NearRelayer implements IMessageProcessor {
       logger.debug('Extracting secret from transaction logs', { orderId });
       
       // Get recent blocks and search for transactions related to this order
-      const currentBlock = await (this.config.nearAccount.connection.provider as any).block({ finality: 'final' });
-      const currentHeight = currentBlock.header?.height || 0;
+      const currentBlock = await withRetry(() => (this.config.nearAccount.connection.provider as any).block({ finality: 'final' })) as { header?: { height?: number } };
+      const currentHeight = (currentBlock.header?.height ?? 0) as number;
       const startBlock = Math.max(0, currentHeight - 100); // Search last 100 blocks
       
       for (let blockHeight = currentHeight; blockHeight >= startBlock; blockHeight--) {
         try {
-          const block = await this.config.nearAccount.connection.provider.block({ blockId: blockHeight.toString() }) as any;
+          const block = await withRetry(() => this.config.nearAccount.connection.provider.block({ blockId: blockHeight.toString() }) as any) as any;
           
           for (const chunk of block.chunks) {
-            const chunkDetails = await this.config.nearAccount.connection.provider.chunk(chunk.chunk_hash);
+            const chunkDetails = await withRetry(() => this.config.nearAccount.connection.provider.chunk(chunk.chunk_hash));
             
             for (const transaction of chunkDetails.transactions) {
               // Check if transaction is related to our escrow contract and order
@@ -711,50 +742,13 @@ export class NearRelayer implements IMessageProcessor {
 
   /**
    * Find secret in order completion history
+   * @deprecated Moved to complete implementation below
    */
-  private async findSecretInOrderHistory(orderId: string): Promise<string | null> {
-    try {
-      // This would query the NEAR contract for historical data about the order
-      // For now, return null as this would require additional contract methods
-      logger.debug('Searching order history for secret', { orderId });
-      
-      // TODO: Implement contract method to get order completion details including secret
-      // This might involve calling a view method like get_order_completion_details(order_id)
-      
-      return null;
-    } catch (error) {
-      logger.error('Failed to find secret in order history', {
-        orderId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    }
-  }
-
+  
   /**
    * Find recent completion event for the given order
+   * @deprecated Moved to complete implementation below
    */
-  private async findRecentCompletionEvent(orderId: string): Promise<SwapOrderCompletedEvent | null> {
-    try {
-      // This would typically involve querying recent blocks for events
-      // For now, return null as this requires integration with the event listener
-      logger.debug('Searching for recent completion event', { orderId });
-      
-      // TODO: Implement event querying logic
-      // This could involve:
-      // 1. Querying recent blocks
-      // 2. Parsing transaction receipts for events
-      // 3. Filtering for SwapOrderCompleted events with matching order ID
-      
-      return null;
-    } catch (error) {
-      logger.error('Failed to find recent completion event', {
-        orderId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    }
-  }
 
   /**
    * Parse a specific transaction for secret revelation
@@ -762,7 +756,7 @@ export class NearRelayer implements IMessageProcessor {
   private async parseTransactionForSecret(txHash: string, orderId: string): Promise<string | null> {
     try {
       // Get transaction status and parse for secret
-      const txStatus = await this.config.nearAccount.connection.provider.txStatus(txHash, this.config.nearAccount.accountId);
+      const txStatus = await withRetry(() => this.config.nearAccount.connection.provider.txStatus(txHash, this.config.nearAccount.accountId));
       
       // Look through transaction receipts for function calls that might contain the secret
       for (const receipt of txStatus.receipts_outcome) {
@@ -806,7 +800,7 @@ export class NearRelayer implements IMessageProcessor {
       this.validator.validateTransactionHash(txHash, 'NEAR');
       this.validator.validateNearAccountId(signerId);
 
-      const txStatus = await this.config.nearAccount.connection.provider.txStatus(txHash, signerId);
+      const txStatus = await withRetry(() => this.config.nearAccount.connection.provider.txStatus(txHash, signerId));
       
       // Check if transaction was successful
       if (!txStatus.receipts_outcome) {
@@ -880,6 +874,15 @@ export class NearRelayer implements IMessageProcessor {
 
       // Use EthereumContractService to execute withdrawal
       const receipt = await this.ethereumContractService.executeWithdrawal(escrowAddress, secret);
+      
+      // Emit event after successful withdrawal execution (receipt available)
+      this.emitter.emit('ethereum:tx:sent', {
+        action: 'withdrawal',
+        chain: 'ETH',
+        txHash: receipt.transactionHash,
+        escrowAddress,
+        amount
+      });
       
       logger.info('Ethereum withdrawal executed successfully', {
         escrowAddress,
@@ -1001,16 +1004,15 @@ export class NearRelayer implements IMessageProcessor {
     const makerAddress = await this.ethereumContractService.getSignerAddress();
     const takerAddress = ethers.utils.getAddress(event.recipient);
     
-    // CRITICAL: 1inch Address type expects uint256 representation of address
-    // Address is stored in lower 160 bits of uint256, upper bits can contain flags
-    // For basic addresses, we just need the address as uint256 (no flags)
+    // CRITICAL: Factory ABI expects plain Ethereum address types for maker/taker/token
+    // Pass checksummed address strings; do not convert to decimal BigNumbers to avoid ENS resolution errors
     
     const immutables = {
       orderHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(`near_order_${event.orderId}`)),
       hashlock: event.secretHash,
-      maker: ethers.BigNumber.from(makerAddress).toString(), // Convert address to uint256 for Address custom type
-      taker: ethers.BigNumber.from(takerAddress).toString(), // Convert address to uint256 for Address custom type
-      token: ethers.BigNumber.from(ethers.constants.AddressZero).toString(), // Convert address to uint256 for Address custom type
+      maker: makerAddress, // address
+      taker: takerAddress, // address
+      token: ethers.constants.AddressZero, // address
       amount: ethAmountWei.toString(), // ETH amount user will receive
       safetyDeposit: feeAmount.toString(), // Use auction fee as safety deposit
       timelocks: timelocksBitPacked.toString() // Properly encoded Timelocks value
@@ -1065,6 +1067,17 @@ export class NearRelayer implements IMessageProcessor {
     [immutables, srcCancellationTimestamp], // Use NEAR timelock + buffer as srcCancellationTimestamp
     totalEthValueToSend // Send exact BigNumber sum: safetyDeposit + amount
   );
+
+      // Emit event immediately after tx is sent for deterministic synchronization
+      this.emitter.emit('ethereum:tx:sent', {
+        action: 'create-escrow',
+        chain: 'ETH',
+        txHash: result.hash,
+        orderId: event.orderId,
+        secretHash: event.secretHash,
+        recipient: event.recipient,
+        amount: immutables.amount
+      });
 
       const receipt = await result.wait();
       // Extract escrow address from event logs
@@ -1199,9 +1212,21 @@ export class NearRelayer implements IMessageProcessor {
 
   private async findOrderBySecretHash(secretHash: string): Promise<string | null> {
     try {
-      // This is a placeholder implementation
-      // In production, you'd want to maintain an index of orders by secret hash
+      // Validate input and query NEAR contract for escrow by secret hash
+      this.validator.validateSecretHash(secretHash);
+
       logger.debug('Finding NEAR order by secret hash', { secretHash });
+
+      const escrow = await this.contractService.findEscrowBySecretHash(secretHash);
+      if (escrow && escrow.id) {
+        logger.info('Found NEAR order by secret hash', {
+          secretHash,
+          orderId: escrow.id
+        });
+        return escrow.id;
+      }
+
+      logger.debug('No NEAR order found for secret hash', { secretHash });
       return null;
     } catch (error) {
       logger.error('Failed to find order by secret hash', {
@@ -1225,6 +1250,105 @@ export class NearRelayer implements IMessageProcessor {
         initiator,
         error: error instanceof Error ? error.message : String(error)
       });
+      return null;
+    }
+  }
+
+  /**
+   * Find a recent completion event for the given order ID
+   * @param orderId The order ID to search for
+   * @returns The most recent SwapOrderCompletedEvent or null if not found
+   */
+  private async findRecentCompletionEvent(orderId: string): Promise<SwapOrderCompletedEvent | null> {
+    try {
+      logger.debug('Searching for recent completion event', { orderId });
+      
+      // Get the escrow details which contains the completion status
+      const escrowDetails = await this.contractService.getEscrowDetails(orderId);
+      
+      if (!escrowDetails) {
+        logger.debug('No escrow found for order', { orderId });
+        return null;
+      }
+
+      // If the escrow is completed, return a completion event
+      if (escrowDetails.status === 'completed') {
+        const completionEvent: SwapOrderCompletedEvent = {
+          orderId,
+          secret: escrowDetails.secret || '',
+          blockHeight: escrowDetails.completed_at ? Math.floor(escrowDetails.completed_at / 1_000_000) : 0, // Convert to block height approximation
+          transactionHash: '' // Will be set by the event listener
+        };
+        
+        logger.debug('Found completed escrow', { 
+          orderId,
+          hasSecret: !!escrowDetails.secret
+        });
+        
+        return completionEvent;
+      }
+
+      logger.debug('No completion found for order', { orderId, status: escrowDetails.status });
+      return null;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      ErrorHandler.handle(new Error(`NearRelayer.findRecentCompletionEvent failed for order ${orderId}: ${errorMessage}`));
+      return null;
+    }
+  }
+
+  /**
+   * Find a secret in order history by querying escrow details
+   * @param orderId The order ID to search for
+   * @returns The secret string or null if not found
+   */
+  private async findSecretInOrderHistory(orderId: string): Promise<string | null> {
+    try {
+      logger.debug('Searching for secret in order history', { orderId });
+      
+      // First try to get the escrow details which may contain the secret
+      const escrowDetails = await this.contractService.getEscrowDetails(orderId);
+      
+      if (escrowDetails?.secret) {
+        logger.debug('Found secret in escrow details', { 
+          orderId,
+          hasSecret: true
+        });
+        return escrowDetails.secret;
+      }
+
+      // If no secret in escrow details, try to find a completion event
+      const completionEvent = await this.findRecentCompletionEvent(orderId);
+      if (completionEvent?.secret) {
+        logger.debug('Found secret in completion event', { 
+          orderId,
+          hasSecret: true
+        });
+        return completionEvent.secret;
+      }
+
+      // As a last resort, try to extract from transaction logs
+      try {
+        const secret = await this.extractSecretFromTransactionLogs(orderId);
+        if (secret) {
+          logger.debug('Extracted secret from transaction logs', { 
+            orderId,
+            hasSecret: true
+          });
+          return secret;
+        }
+      } catch (logError) {
+        logger.warn('Failed to extract secret from transaction logs', { 
+          orderId,
+          error: logError instanceof Error ? logError.message : String(logError)
+        });
+      }
+
+      logger.warn('Secret not found in order history', { orderId });
+      return null;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      ErrorHandler.handle(new Error(`NearRelayer.findSecretInOrderHistory failed for order ${orderId}: ${errorMessage}`));
       return null;
     }
   }

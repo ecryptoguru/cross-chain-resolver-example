@@ -1,575 +1,245 @@
-/**
- * Edge case tests for partial fill functionality
- * Tests boundary conditions, error scenarios, and complex workflows
- */
-
-import { describe, it, beforeEach, afterEach } from 'node:test';
-import assert from 'node:assert';
 import { ethers } from 'ethers';
-import { NearPartialFillService } from '../../src/services/NearPartialFillService.js';
-import { EthereumPartialFillService } from '../../src/services/EthereumPartialFillService.js';
+import { jest } from '@jest/globals';
+import { EscrowSearchParams } from '../../src/types/interfaces';
 
-// Mock implementations for edge case testing
-class MockNearAccountEdgeCases {
-  accountId = 'test.near';
-  connection = {};
-  
-  private shouldFail = false;
-  private mockOrderState: any = null;
+// Import mock after jest.mock
+import { MockProvider } from '../mocks/ethers-mock-enhanced';
 
-  setMockFailure(shouldFail: boolean) {
-    this.shouldFail = shouldFail;
-  }
-
-  setMockOrderState(state: any) {
-    this.mockOrderState = state;
-  }
-
-  async functionCall(params: any) {
-    if (this.shouldFail) {
-      throw new Error('Mock NEAR function call failure');
+// Type-safe mock implementations (synchronous to match real service)
+const mockValidationService = {
+  validateEthereumAddress: jest.fn((address: string): boolean => {
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      throw new Error('Invalid Ethereum address');
     }
-    return { transaction: { hash: 'mock_tx_hash' } };
-  }
+    return true;
+  }),
   
-  async viewFunction(params: any) {
-    if (this.shouldFail) {
-      throw new Error('Mock NEAR view function failure');
+  validateSecret: jest.fn((secret: string): boolean => {
+    if (!secret || typeof secret !== 'string' || secret.trim() === '') {
+      throw new Error('Secret must be a non-empty string');
     }
+    return true;
+  }),
+  
+  validateSecretHash: jest.fn((hash: string): boolean => {
+    if (!hash || typeof hash !== 'string' || hash.trim() === '') {
+      throw new Error('Secret hash is required');
+    }
+    return true;
+  }),
+  
+  validateAmount: jest.fn((amount: string | bigint): boolean => {
+    const amountStr = amount.toString();
+    if (!/^\d+$/.test(amountStr) || BigInt(amountStr) <= 0n) {
+      throw new Error('Invalid amount');
+    }
+    return true;
+  }),
+  
+  validateEscrowDetails: jest.fn((details: unknown): boolean => {
+    if (!details) {
+      throw new Error('Escrow details are required');
+    }
+    return true;
+  })
+};
+
+// Mock the ValidationService
+jest.mock('../../src/services/ValidationService', () => ({
+  ValidationService: jest.fn(() => mockValidationService)
+}));
+
+// Import the service after setting up mocks
+import { EthereumContractService } from '../../src/services/EthereumContractService';
+
+describe('EthereumContractService Edge Cases', () => {
+  let service: EthereumContractService;
+  let mockProvider: MockProvider;
+  let mockSigner: ethers.Wallet;
+  const factoryAddress = '0x1234567890123456789012345678901234567890';
+
+  beforeEach(() => {
+    // Create a mock provider and signer
+    mockProvider = new MockProvider();
+    mockSigner = new ethers.Wallet(
+      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', // Hardhat default private key
+      mockProvider as any
+    );
     
-    if (this.mockOrderState) {
-      return this.mockOrderState;
-    }
-
-    // Default mock state
-    return {
-      filled_amount: '0',
-      remaining_amount: '1000000000000000000000000', // 1 NEAR
-      fill_count: 0,
-      is_fully_filled: false,
-      is_cancelled: false,
-      last_fill_timestamp: Date.now() * 1000000,
-      child_orders: []
-    };
-  }
-}
-
-class MockEthereumContractEdgeCases {
-  private shouldFail = false;
-  private mockOrderState: any = null;
-
-  setMockFailure(shouldFail: boolean) {
-    this.shouldFail = shouldFail;
-  }
-
-  setMockOrderState(state: any) {
-    this.mockOrderState = state;
-  }
-
-  async processPartialFill() {
-    if (this.shouldFail) {
-      throw new Error('Contract execution reverted');
-    }
-    return {
-      hash: 'mock_eth_tx_hash',
-      wait: async () => ({ status: 1 })
-    };
-  }
-  
-  async splitOrder() {
-    if (this.shouldFail) {
-      throw new Error('Contract execution reverted');
-    }
-    return {
-      hash: 'mock_split_tx_hash',
-      wait: async () => ({ status: 1 })
-    };
-  }
-  
-  async processRefund() {
-    if (this.shouldFail) {
-      throw new Error('Contract execution reverted');
-    }
-    return {
-      hash: 'mock_refund_tx_hash',
-      wait: async () => ({ status: 1 })
-    };
-  }
-  
-  async getOrderState() {
-    if (this.shouldFail) {
-      throw new Error('Contract view function failed');
-    }
-
-    if (this.mockOrderState) {
-      return this.mockOrderState;
-    }
-
-    // Default mock state
-    return {
-      filledAmount: ethers.BigNumber.from('0'),
-      remainingAmount: ethers.BigNumber.from('1000000000000000000'), // 1 ETH
-      fillCount: ethers.BigNumber.from('0'),
-      isFullyFilled: false,
-      isCancelled: false,
-      lastFillTimestamp: ethers.BigNumber.from(Math.floor(Date.now() / 1000)),
-      childOrders: []
-    };
-  }
-
-  async estimateGas() {
-    if (this.shouldFail) {
-      throw new Error('Gas estimation failed');
-    }
-    return ethers.BigNumber.from('100000');
-  }
-}
-
-describe('Partial Fill Edge Cases', () => {
-  let nearPartialFillService: NearPartialFillService;
-  let ethereumPartialFillService: EthereumPartialFillService;
-  let mockNearAccount: MockNearAccountEdgeCases;
-  let mockEthereumContract: MockEthereumContractEdgeCases;
-
-  beforeEach(async () => {
-    mockNearAccount = new MockNearAccountEdgeCases();
-    mockEthereumContract = new MockEthereumContractEdgeCases();
-
-    nearPartialFillService = new NearPartialFillService(
-      mockNearAccount as any,
-      'test-escrow.near'
+    // Mock the getAddress method
+    jest.spyOn(mockSigner, 'getAddress').mockResolvedValue('0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266');
+    
+    // Initialize the service with mock provider and signer
+    service = new EthereumContractService(
+      mockProvider as unknown as ethers.providers.JsonRpcProvider,
+      mockSigner as unknown as ethers.Signer,
+      factoryAddress
     );
-
-    // Mock provider and signer for Ethereum service
-    const mockProvider = {
-      getNetwork: async () => ({ chainId: 11155111 }),
-      estimateGas: async () => ethers.BigNumber.from('100000')
-    };
-
-    const mockSigner = {
-      getAddress: async () => '0x1234567890123456789012345678901234567890',
-      provider: mockProvider
-    };
-
-    ethereumPartialFillService = new EthereumPartialFillService(
-      mockProvider as any,
-      mockSigner as any,
-      '0x1234567890123456789012345678901234567890',
-      []
-    );
-
-    // Override contract creation to use our mock
-    (ethereumPartialFillService as any).createContract = () => mockEthereumContract;
   });
 
-  describe('Boundary Conditions', () => {
-    it('should handle minimum possible fill amount', async () => {
-      const orderId = 'min_fill_order';
-      const minFillAmount = '1'; // 1 yoctoNEAR (smallest unit)
-      const recipient = 'recipient.near';
-      const token = 'near';
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
 
-      // Set mock state for very small remaining amount
-      mockNearAccount.setMockOrderState({
-        filled_amount: '999999999999999999999999',
-        remaining_amount: '1',
-        fill_count: 9,
-        is_fully_filled: false,
-        is_cancelled: false,
-        last_fill_timestamp: Date.now() * 1000000,
-        child_orders: []
-      });
-
-      try {
-        await nearPartialFillService.processPartialFill({
-          orderId,
-          fillAmount: minFillAmount,
-          recipient,
-          token
-        });
-        assert.ok(true, 'Minimum fill amount handled correctly');
-      } catch (error) {
-        // Expected behavior - minimum fill validation should catch this
-        assert.ok(error instanceof Error, 'Minimum fill validation working');
-      }
+  describe('getEscrowDetails', () => {
+    it('should handle invalid escrow address', async () => {
+      const invalidAddress = '0xinvalid';
+      
+      await expect(service.getEscrowDetails(invalidAddress))
+        .rejects
+        .toThrow('Failed to get escrow details');
     });
 
-    it('should handle maximum possible fill amount', async () => {
-      const orderId = 'max_fill_order';
-      const maxFillAmount = '1000000000000000000000000'; // 1 NEAR (full order)
-      const recipient = 'recipient.near';
-      const token = 'near';
-
-      await nearPartialFillService.processPartialFill({
-        orderId,
-        fillAmount: maxFillAmount,
-        recipient,
-        token
-      });
-
-      assert.ok(true, 'Maximum fill amount handled correctly');
-    });
-
-    it('should handle fill amount exactly at minimum percentage', async () => {
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-      const exactMinFillAmount = '100000000000000000'; // 0.1 ETH (10% of 1 ETH)
-      const recipient = '0x1234567890123456789012345678901234567890';
-      const token = '0x0000000000000000000000000000000000000000';
-
-      await ethereumPartialFillService.processPartialFill({
-        orderHash,
-        fillAmount: exactMinFillAmount,
-        recipient,
-        token
-      });
-
-      assert.ok(true, 'Exact minimum percentage fill handled correctly');
-    });
-
-    it('should handle fill amount just below minimum percentage', async () => {
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-      const belowMinFillAmount = '99999999999999999'; // Just below 0.1 ETH
-      const recipient = '0x1234567890123456789012345678901234567890';
-      const token = '0x0000000000000000000000000000000000000000';
-
-      try {
-        await ethereumPartialFillService.processPartialFill({
-          orderHash,
-          fillAmount: belowMinFillAmount,
-          recipient,
-          token
-        });
-        assert.fail('Should have rejected fill below minimum percentage');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Below minimum percentage correctly rejected');
-      }
+    it('should handle contract call failure', async () => {
+      const escrowAddress = '0x1234567890123456789012345678901234567891';
+      const mockError = new Error('Contract call failed');
+      
+      // Mock underlying contract.getDetails to fail so service wrapper throws ContractError
+      const contractSpy = jest
+        .spyOn(ethers as any, 'Contract')
+        .mockImplementation(() => ({
+          getDetails: jest.fn(async () => { throw mockError; })
+        }));
+      
+      await expect(service.getEscrowDetails(escrowAddress))
+        .rejects
+        .toThrow('Failed to get escrow details');
+      
+      contractSpy.mockRestore();
     });
   });
 
-  describe('Network Failure Scenarios', () => {
-    it('should handle NEAR network failures gracefully', async () => {
-      mockNearAccount.setMockFailure(true);
-
-      const orderId = 'network_fail_order';
-      const fillAmount = '500000000000000000000000';
-      const recipient = 'recipient.near';
-      const token = 'near';
-
-      try {
-        await nearPartialFillService.processPartialFill({
-          orderId,
-          fillAmount,
-          recipient,
-          token
-        });
-        assert.fail('Should have thrown error for network failure');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Network failure handled correctly');
-        assert.ok(error.message.includes('Mock NEAR function call failure'));
-      }
+  describe('findEscrowBySecretHash', () => {
+    it('should handle empty secret hash', async () => {
+      await expect(service.findEscrowBySecretHash(''))
+        .rejects
+        .toThrow('Failed to find escrow by secret hash');
     });
 
-    it('should handle Ethereum contract failures gracefully', async () => {
-      mockEthereumContract.setMockFailure(true);
-
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-      const fillAmount = '500000000000000000';
-      const recipient = '0x1234567890123456789012345678901234567890';
-      const token = '0x0000000000000000000000000000000000000000';
-
-      try {
-        await ethereumPartialFillService.processPartialFill({
-          orderHash,
-          fillAmount,
-          recipient,
-          token
-        });
-        assert.fail('Should have thrown error for contract failure');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Contract failure handled correctly');
-        assert.ok(error.message.includes('Contract execution reverted'));
-      }
-    });
-
-    it('should handle gas estimation failures', async () => {
-      mockEthereumContract.setMockFailure(true);
-
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-
-      try {
-        await ethereumPartialFillService.estimateGas(orderHash, '500000000000000000');
-        assert.fail('Should have thrown error for gas estimation failure');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Gas estimation failure handled correctly');
-      }
+    it('should handle search with no results', async () => {
+      const secretHash = '0x' + '1'.repeat(64);
+      
+      // Stub factory contract to provide EscrowCreated filter and no events
+      const stubFactory = {
+        address: factoryAddress,
+        filters: { EscrowCreated: jest.fn((..._args: any[]) => ({})) },
+        queryFilter: jest.fn(async () => [])
+      } as any;
+      (service as any).factoryContract = stubFactory;
+      
+      const result = await service.findEscrowBySecretHash(secretHash, 100);
+      
+      expect(result).toBeNull();
+      expect(stubFactory.filters.EscrowCreated).toHaveBeenCalled();
     });
   });
 
-  describe('Race Conditions and Concurrency', () => {
-    it('should handle concurrent partial fills on same order', async () => {
-      const orderId = 'concurrent_order';
-      const fillAmount = '100000000000000000000000'; // 0.1 NEAR each
-      const recipient = 'recipient.near';
-      const token = 'near';
-
-      // Simulate concurrent fills
-      const promises = [];
-      for (let i = 0; i < 5; i++) {
-        const promise = nearPartialFillService.processPartialFill({
-          orderId: `${orderId}_${i}`,
-          fillAmount,
-          recipient,
-          token
-        });
-        promises.push(promise);
-      }
-
-      // All should complete without errors
-      await Promise.all(promises);
-      assert.ok(true, 'Concurrent partial fills handled correctly');
+  describe('executeWithdrawal', () => {
+    it('should handle invalid secret', async () => {
+      const escrowAddress = '0x1234567890123456789012345678901234567891';
+      const invalidSecret = '';
+      
+      await expect(service.executeWithdrawal(escrowAddress, invalidSecret))
+        .rejects
+        .toThrow('Secret must be a non-empty string');
     });
 
-    it('should handle rapid order splitting and filling', async () => {
-      const orderId = 'rapid_split_order';
-      const amounts = [
-        '200000000000000000000000', // 0.2 NEAR
-        '300000000000000000000000', // 0.3 NEAR
-        '500000000000000000000000'  // 0.5 NEAR
-      ];
-
-      // Split order
-      await nearPartialFillService.splitOrder(orderId, amounts);
-
-      // Immediately try to fill child orders
-      const fillPromises = amounts.map((amount, index) => 
-        nearPartialFillService.processPartialFill({
-          orderId: `${orderId}_child_${index}`,
-          fillAmount: amount,
-          recipient: 'recipient.near',
-          token: 'near'
-        })
-      );
-
-      await Promise.all(fillPromises);
-      assert.ok(true, 'Rapid splitting and filling handled correctly');
-    });
-  });
-
-  describe('State Inconsistency Scenarios', () => {
-    it('should handle order state inconsistencies', async () => {
-      // Set inconsistent mock state (filled > total)
-      mockNearAccount.setMockOrderState({
-        filled_amount: '2000000000000000000000000', // 2 NEAR
-        remaining_amount: '1000000000000000000000000', // 1 NEAR (inconsistent)
-        fill_count: 5,
-        is_fully_filled: false,
-        is_cancelled: false,
-        last_fill_timestamp: Date.now() * 1000000,
-        child_orders: []
-      });
-
-      const orderId = 'inconsistent_order';
-
-      try {
-        const canFill = await nearPartialFillService.canPartiallyFill(orderId, '100000000000000000000000');
-        assert.ok(!canFill, 'Should detect state inconsistency');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'State inconsistency detected');
-      }
-    });
-
-    it('should handle cancelled order attempts', async () => {
-      // Set cancelled order state
-      mockNearAccount.setMockOrderState({
-        filled_amount: '0',
-        remaining_amount: '1000000000000000000000000',
-        fill_count: 0,
-        is_fully_filled: false,
-        is_cancelled: true, // Order is cancelled
-        last_fill_timestamp: Date.now() * 1000000,
-        child_orders: []
-      });
-
-      const orderId = 'cancelled_order';
-      const fillAmount = '500000000000000000000000';
-
-      try {
-        await nearPartialFillService.processPartialFill({
-          orderId,
-          fillAmount,
-          recipient: 'recipient.near',
-          token: 'near'
-        });
-        assert.fail('Should have rejected fill on cancelled order');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Cancelled order fill correctly rejected');
-      }
-    });
-
-    it('should handle already fully filled orders', async () => {
-      // Set fully filled order state
-      mockEthereumContract.setMockOrderState({
-        filledAmount: ethers.BigNumber.from('1000000000000000000'), // 1 ETH
-        remainingAmount: ethers.BigNumber.from('0'),
-        fillCount: ethers.BigNumber.from('3'),
-        isFullyFilled: true,
-        isCancelled: false,
-        lastFillTimestamp: ethers.BigNumber.from(Math.floor(Date.now() / 1000)),
-        childOrders: []
-      });
-
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-      const fillAmount = '100000000000000000';
-
-      try {
-        await ethereumPartialFillService.processPartialFill({
-          orderHash,
-          fillAmount,
-          recipient: '0x1234567890123456789012345678901234567890',
-          token: '0x0000000000000000000000000000000000000000'
-        });
-        assert.fail('Should have rejected fill on fully filled order');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Fully filled order fill correctly rejected');
-      }
-    });
-  });
-
-  describe('Complex Workflow Edge Cases', () => {
-    it('should handle splitting already partially filled orders', async () => {
-      // Set partially filled order state
-      mockNearAccount.setMockOrderState({
-        filled_amount: '300000000000000000000000', // 0.3 NEAR already filled
-        remaining_amount: '700000000000000000000000', // 0.7 NEAR remaining
-        fill_count: 2,
-        is_fully_filled: false,
-        is_cancelled: false,
-        last_fill_timestamp: Date.now() * 1000000,
-        child_orders: []
-      });
-
-      const orderId = 'partial_then_split_order';
-      const splitAmounts = [
-        '300000000000000000000000', // 0.3 NEAR
-        '400000000000000000000000'  // 0.4 NEAR
-      ];
-
-      await nearPartialFillService.splitOrder(orderId, splitAmounts);
-      assert.ok(true, 'Splitting partially filled order handled correctly');
-    });
-
-    it('should handle refunds on partially filled orders', async () => {
-      // Set partially filled order state
-      mockEthereumContract.setMockOrderState({
-        filledAmount: ethers.BigNumber.from('600000000000000000'), // 0.6 ETH filled
-        remainingAmount: ethers.BigNumber.from('400000000000000000'), // 0.4 ETH remaining
-        fillCount: ethers.BigNumber.from('3'),
-        isFullyFilled: false,
-        isCancelled: false,
-        lastFillTimestamp: ethers.BigNumber.from(Math.floor(Date.now() / 1000)),
-        childOrders: []
-      });
-
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-      const refundAmount = '400000000000000000'; // Refund remaining amount
-
-      await ethereumPartialFillService.processRefund({
-        orderHash,
+    it('should handle withdrawal failure', async () => {
+      const escrowAddress = '0x1234567890123456789012345678901234567891';
+      const secret = 'valid-secret';
+      const mockError = new Error('Withdrawal failed');
+      
+      // Ensure state allows withdrawal
+      jest.spyOn(service as any, 'getEscrowDetails').mockResolvedValue({
+        status: 1,
+        token: '0x0000000000000000000000000000000000000000',
+        amount: '1000000000000000000',
+        timelock: 0,
+        secretHash: '0x' + '1'.repeat(64),
+        initiator: '0x1234567890123456789012345678901234567890',
         recipient: '0x1234567890123456789012345678901234567890',
-        refundAmount,
-        reason: 'Order timeout'
+        chainId: 1,
+        escrowAddress
       });
-
-      assert.ok(true, 'Refund on partially filled order handled correctly');
-    });
-
-    it('should handle nested order splitting scenarios', async () => {
-      const parentOrderId = 'nested_split_parent';
       
-      // First level split
-      const firstLevelAmounts = [
-        '500000000000000000000000', // 0.5 NEAR
-        '500000000000000000000000'  // 0.5 NEAR
-      ];
-
-      await nearPartialFillService.splitOrder(parentOrderId, firstLevelAmounts);
-
-      // Second level split on first child
-      const secondLevelAmounts = [
-        '250000000000000000000000', // 0.25 NEAR
-        '250000000000000000000000'  // 0.25 NEAR
-      ];
-
-      await nearPartialFillService.splitOrder(`${parentOrderId}_child_0`, secondLevelAmounts);
-
-      assert.ok(true, 'Nested order splitting handled correctly');
+      // Mock contract.withdraw to fail
+      const contractSpy = jest.spyOn(ethers as any, 'Contract').mockImplementation(() => ({
+        estimateGas: { withdraw: jest.fn(async () => ethers.BigNumber.from('300000') as any) },
+        withdraw: jest.fn(async () => { throw mockError; })
+      }));
+      
+      await expect(service.executeWithdrawal(escrowAddress, secret))
+        .rejects
+        .toThrow('Failed to execute withdrawal');
+      
+      contractSpy.mockRestore();
     });
   });
 
-  describe('Memory and Performance Edge Cases', () => {
-    it('should handle orders with maximum child orders', async () => {
-      const orderId = 'max_children_order';
-      const maxChildAmounts = [];
+  describe('executeRefund', () => {
+    it('should handle refund failure', async () => {
+      const escrowAddress = '0x1234567890123456789012345678901234567891';
+      const mockError = new Error('Refund failed');
       
-      // Create maximum number of child orders (assume max is 50)
-      for (let i = 0; i < 50; i++) {
-        maxChildAmounts.push('20000000000000000000000'); // 0.02 NEAR each
-      }
+      // Ensure state allows refund
+      jest.spyOn(service as any, 'getEscrowDetails').mockResolvedValue({
+        status: 1,
+        token: '0x0000000000000000000000000000000000000000',
+        amount: '1000000000000000000',
+        timelock: 0,
+        secretHash: '0x' + '1'.repeat(64),
+        initiator: '0x1234567890123456789012345678901234567890',
+        recipient: '0x1234567890123456789012345678901234567890',
+        chainId: 1,
+        escrowAddress
+      });
+      
+      // Mock contract.refund to fail
+      const contractSpy = jest.spyOn(ethers as any, 'Contract').mockImplementation(() => ({
+        refund: jest.fn(async () => { throw mockError; })
+      }));
+      
+      await expect(service.executeRefund(escrowAddress))
+        .rejects
+        .toThrow('Failed to execute refund');
+      
+      contractSpy.mockRestore();
+    });
+  });
 
-      await nearPartialFillService.splitOrder(orderId, maxChildAmounts);
-      assert.ok(true, 'Maximum child orders handled correctly');
+  describe('findEscrowByParams', () => {
+    it('should handle invalid search parameters', async () => {
+      const invalidParams = {} as EscrowSearchParams;
+      // Stub factory contract to avoid errors when creating filters
+      const stubFactory = {
+        address: factoryAddress,
+        filters: { EscrowCreated: jest.fn((..._args: any[]) => ({})) },
+        queryFilter: jest.fn(async () => [])
+      } as any;
+      (service as any).factoryContract = stubFactory;
+      const result = await service.findEscrowByParams(invalidParams);
+      expect(result).toBeNull();
+      expect(stubFactory.filters.EscrowCreated).toHaveBeenCalled();
     });
 
-    it('should handle very large fill amounts (BigInt edge cases)', async () => {
-      const orderHash = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-      const largeFillAmount = '999999999999999999999999999999999999'; // Very large number
-      const recipient = '0x1234567890123456789012345678901234567890';
-      const token = '0x0000000000000000000000000000000000000000';
-
-      try {
-        await ethereumPartialFillService.processPartialFill({
-          orderHash,
-          fillAmount: largeFillAmount,
-          recipient,
-          token
-        });
-        assert.fail('Should have rejected extremely large fill amount');
-      } catch (error) {
-        assert.ok(error instanceof Error, 'Large fill amount correctly rejected');
-      }
-    });
-
-    it('should handle rapid successive operations', async () => {
-      const orderId = 'rapid_ops_order';
-      const operations = [];
-
-      // Mix of different operations in rapid succession
-      for (let i = 0; i < 20; i++) {
-        if (i % 3 === 0) {
-          // Partial fill
-          operations.push(
-            nearPartialFillService.processPartialFill({
-              orderId: `${orderId}_${i}`,
-              fillAmount: '50000000000000000000000',
-              recipient: 'recipient.near',
-              token: 'near'
-            })
-          );
-        } else if (i % 3 === 1) {
-          // Check if can fill
-          operations.push(
-            nearPartialFillService.canPartiallyFill(`${orderId}_${i}`, '50000000000000000000000')
-          );
-        } else {
-          // Get order state
-          operations.push(
-            nearPartialFillService.getOrderState(`${orderId}_${i}`)
-          );
-        }
-      }
-
-      await Promise.all(operations);
-      assert.ok(true, 'Rapid successive operations handled correctly');
+    it('should handle search with invalid block range', async () => {
+      const params: EscrowSearchParams = {
+        initiator: '0x1234567890123456789012345678901234567890',
+        maxBlocksToSearch: 0 // Will fallback to default; should not throw
+      };
+      
+      // Stub factory with empty results to avoid ContractError due to missing filters
+      const stubFactory = {
+        address: factoryAddress,
+        filters: { EscrowCreated: jest.fn((..._args: any[]) => ({})) },
+        queryFilter: jest.fn(async () => [])
+      } as any;
+      (service as any).factoryContract = stubFactory;
+      
+      const querySpy = jest.spyOn(stubFactory, 'queryFilter').mockImplementation(async () => []);
+      const result = await service.findEscrowByParams(params);
+      expect(result).toBeNull();
+      querySpy.mockRestore();
     });
   });
 });

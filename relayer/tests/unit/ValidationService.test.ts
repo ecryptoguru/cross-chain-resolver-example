@@ -3,10 +3,9 @@
  * Tests all validation methods with positive and negative cases
  */
 
-import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { ValidationService } from '../../src/services/ValidationService.js';
-import { ValidationError } from '../../src/utils/errors.js';
+import { ValidationService } from '../../src/services/ValidationService';
+import { ValidationError } from '../../src/utils/errors';
 
 describe('ValidationService', () => {
   let validationService: ValidationService;
@@ -608,6 +607,81 @@ describe('ValidationService', () => {
           ValidationError,
           `Should handle falsy value: ${value}`
         );
+      });
+    });
+  });
+  
+  describe('validateAuctionConfig', () => {
+    test('should accept a fully valid auction config', () => {
+      const cfg = {
+        duration: 300,
+        initialRateBump: 50,
+        points: [
+          { delay: 0, coefficient: 0 },
+          { delay: 60, coefficient: 10 },
+          { delay: 120, coefficient: 25 }
+        ],
+        gasBumpEstimate: 21000,
+        gasPriceEstimate: 20,
+        minFillPercentage: 0.5,
+        maxRateBump: 200
+      };
+      assert.strictEqual(validationService.validateAuctionConfig(cfg), true);
+    });
+
+    test('should allow partial config overrides', () => {
+      const cfg = { duration: 180 };
+      assert.strictEqual(validationService.validateAuctionConfig(cfg), true);
+    });
+
+    test('should reject invalid auction configs', () => {
+      const invalids: Array<{ cfg: any; reason: string }> = [
+        { cfg: null, reason: 'null config' },
+        { cfg: [], reason: 'array config' },
+        { cfg: { duration: 10 }, reason: 'duration too small' },
+        { cfg: { initialRateBump: -1 }, reason: 'negative initialRateBump' },
+        { cfg: { points: [] }, reason: 'empty points' },
+        { cfg: { points: [{ delay: 10, coefficient: 1 }, { delay: 5, coefficient: 2 }] }, reason: 'unsorted points' },
+        { cfg: { points: [{ delay: 0, coefficient: 1.2 }] }, reason: 'non-integer coefficient' },
+        { cfg: { gasBumpEstimate: -5 }, reason: 'negative gasBumpEstimate' },
+        { cfg: { gasPriceEstimate: -1 }, reason: 'negative gasPriceEstimate' },
+        { cfg: { minFillPercentage: 1.5 }, reason: 'minFillPercentage > 1' },
+        { cfg: { maxRateBump: -10 }, reason: 'negative maxRateBump' }
+      ];
+
+      invalids.forEach(({ cfg, reason }) => {
+        assert.throws(() => validationService.validateAuctionConfig(cfg), ValidationError, `Should reject: ${reason}`);
+      });
+    });
+  });
+
+  describe('validateAuctionRuntimeParams', () => {
+    test('should accept valid runtime params', () => {
+      const now = Math.floor(Date.now() / 1000);
+      const params = {
+        fromChain: 'ETH',
+        toChain: 'NEAR',
+        fromAmount: '1000000000000000000',
+        baseExchangeRate: 900,
+        startTime: now,
+        orderId: 'order_123456'
+      };
+      assert.strictEqual(validationService.validateAuctionRuntimeParams(params), true);
+    });
+
+    test('should reject invalid runtime params', () => {
+      const cases: Array<{ params: any; reason: string }> = [
+        { params: { fromChain: 'ETH', toChain: 'ETH', fromAmount: '1', baseExchangeRate: 1, startTime: 0, orderId: 'valid_id' }, reason: 'same chain' },
+        { params: { fromChain: 'FOO', toChain: 'NEAR', fromAmount: '1', baseExchangeRate: 1, startTime: 0, orderId: 'valid_id' }, reason: 'invalid fromChain' },
+        { params: { fromChain: 'ETH', toChain: 'NEAR', fromAmount: 'abc', baseExchangeRate: 1, startTime: 0, orderId: 'valid_id' }, reason: 'invalid amount' },
+        { params: { fromChain: 'ETH', toChain: 'NEAR', fromAmount: '1', baseExchangeRate: 0, startTime: 0, orderId: 'valid_id' }, reason: 'non-positive baseExchangeRate' },
+        { params: { fromChain: 'ETH', toChain: 'NEAR', fromAmount: '1', baseExchangeRate: 1, startTime: -1, orderId: 'valid_id' }, reason: 'negative startTime' },
+        { params: { fromChain: 'ETH', toChain: 'NEAR', fromAmount: '1', baseExchangeRate: 1, startTime: 1.5, orderId: 'valid_id' }, reason: 'non-integer startTime' },
+        { params: { fromChain: 'ETH', toChain: 'NEAR', fromAmount: '1', baseExchangeRate: 1, startTime: 0, orderId: 'x' }, reason: 'invalid orderId (too short)' }
+      ];
+
+      cases.forEach(({ params, reason }) => {
+        assert.throws(() => validationService.validateAuctionRuntimeParams(params), ValidationError, `Should reject: ${reason}`);
       });
     });
   });

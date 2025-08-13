@@ -15,13 +15,17 @@
     "paths": {
       "@/*": ["./src/*"]
     },
-    "types": ["node", "jest"],
+    "types": ["node"],
     "typeRoots": [
       "./node_modules/@types",
       "./src/types"
-    ],
-    "isolatedModules": true
+    ]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ]
 }

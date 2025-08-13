@@ -7,6 +7,17 @@ import { IEventListener, NearProvider } from '../types/interfaces.js';
 import { NetworkError, ErrorHandler } from '../utils/errors.js';
 import { ValidationService } from './ValidationService.js';
 import { logger } from '../utils/logger.js';
+import { withRetry } from '../utils/retry.js';
+
+export interface NearEventListenerOptions {
+  /** Poll interval in milliseconds */
+  pollIntervalMs?: number;
+  /**
+   * Optional starting block height (inclusive) to begin processing from.
+   * If provided, the listener will process events starting at this block on first poll.
+   */
+  startBlock?: number;
+}
 
 export interface NearEventHandlers {
   onSwapOrderCreated?: (event: SwapOrderCreatedEvent) => Promise<void>;
@@ -72,19 +83,25 @@ export class NearEventListener implements IEventListener {
   private pollTimer?: NodeJS.Timeout;
   private lastProcessedBlock = 0;
   private readonly processedBlocks: Set<number> = new Set();
+  private readonly configuredStartBlock?: number;
 
   constructor(
     provider: NearProvider,
     escrowContractId: string,
     handlers: NearEventHandlers,
-    pollIntervalMs = 5000
+    optionsOrPollInterval: number | NearEventListenerOptions = 5000
   ) {
     this.validateConstructorParams(provider, escrowContractId, handlers);
     
     this.provider = provider;
     this.escrowContractId = escrowContractId;
     this.handlers = handlers;
-    this.pollInterval = pollIntervalMs;
+    if (typeof optionsOrPollInterval === 'number') {
+      this.pollInterval = optionsOrPollInterval;
+    } else {
+      this.pollInterval = optionsOrPollInterval.pollIntervalMs ?? 5000;
+      this.configuredStartBlock = optionsOrPollInterval.startBlock;
+    }
     this.validator = new ValidationService();
   }
 
@@ -98,13 +115,20 @@ export class NearEventListener implements IEventListener {
     }
 
     try {
-      // Get current block height
-      const status = await this.provider.status();
-      this.lastProcessedBlock = status.sync_info.latest_block_height;
+      // Determine starting point
+      let effectiveStartBlock: number;
+      if (this.configuredStartBlock !== undefined) {
+        effectiveStartBlock = this.configuredStartBlock;
+      } else {
+        const status = await withRetry(() => this.provider.status());
+        effectiveStartBlock = status.sync_info.latest_block_height;
+      }
+      // We track lastProcessedBlock as the block before the first block we want to process
+      this.lastProcessedBlock = Math.max(0, effectiveStartBlock - 1);
       
       logger.info('Starting NEAR event listener', {
         escrowContractId: this.escrowContractId,
-        startBlock: this.lastProcessedBlock,
+        startBlock: effectiveStartBlock,
         pollInterval: this.pollInterval
       });
 
@@ -214,7 +238,7 @@ export class NearEventListener implements IEventListener {
 
   private async pollForEvents(): Promise<void> {
     try {
-      const status = await this.provider.status();
+      const status = await withRetry(() => this.provider.status());
       const currentBlock = status.sync_info.latest_block_height;
       
       if (currentBlock <= this.lastProcessedBlock) {
@@ -268,7 +292,7 @@ export class NearEventListener implements IEventListener {
     try {
       logger.debug('Processing NEAR block', { blockHeight });
 
-      const block = await this.provider.block({ blockId: blockHeight });
+      const block = await withRetry(() => this.provider.block({ blockId: blockHeight }));
       
       if (!block.chunks || block.chunks.length === 0) {
         logger.debug('No chunks in block', { blockHeight });
@@ -291,7 +315,7 @@ export class NearEventListener implements IEventListener {
 
   private async processChunk(chunkHash: string, blockHeight: number): Promise<void> {
     try {
-      const chunk = await this.provider.chunk(chunkHash);
+      const chunk = await withRetry(() => this.provider.chunk(chunkHash));
       
       if (!chunk.transactions || chunk.transactions.length === 0) {
         return; // No transactions in chunk
@@ -336,7 +360,7 @@ export class NearEventListener implements IEventListener {
       });
       
       // Get full transaction status to access logs and outcomes
-      const txStatus = await this.provider.txStatus(tx.hash, tx.signer_id);
+      const txStatus = await withRetry(() => this.provider.txStatus(tx.hash, tx.signer_id));
       
       if (!txStatus.receipts_outcome) {
         return;

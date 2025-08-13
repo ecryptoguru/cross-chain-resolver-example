@@ -7,6 +7,7 @@ import { NearAccount, NearEscrowDetails, IContractService } from '../types/inter
 import { ContractError, ValidationError, ErrorHandler } from '../utils/errors.js';
 import { ValidationService } from './ValidationService.js';
 import { logger } from '../utils/logger.js';
+import { withRetry } from '../utils/retry.js';
 
 export interface NearSwapOrderParams {
   recipient: string;
@@ -82,19 +83,20 @@ export class NearContractService implements IContractService {
 
       // Convert params array to args object (NEAR expects named parameters)
       const args = params.length > 0 ? params[0] : {};
+      const safeArgs = this.makeJsonSafe(args);
 
-      const result = await this.nearAccount.functionCall({
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId,
         methodName: method,
-        args,
+        args: safeArgs,
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: BigInt('0')
-      });
+      }));
 
       logger.info('NEAR transaction executed successfully', {
         contractId,
         method,
-        args: this.sanitizeArgsForLogging(args)
+        args: this.sanitizeArgsForLogging(safeArgs)
       });
 
       return result;
@@ -124,22 +126,24 @@ export class NearContractService implements IContractService {
         attachedDeposit: params.attachedDeposit.toString()
       });
 
-      const result = await this.nearAccount.functionCall({
+      const args = {
+        recipient: params.recipient,
+        hashlock: params.hashlock,
+        timelock_duration: params.timelockDuration
+      };
+      const safeArgs = this.makeJsonSafe(args);
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.escrowContractId,
         methodName: 'create_swap_order',
-        args: {
-          recipient: params.recipient,
-          hashlock: params.hashlock,
-          timelock_duration: params.timelockDuration
-        },
+        args: safeArgs,
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: params.attachedDeposit
-      });
+      }));
 
       if (result.status && typeof result.status === 'object' && 'SuccessValue' in result.status) {
         logger.info('NEAR swap order created successfully', {
-          recipient: params.recipient,
-          result
+          escrowContractId: this.escrowContractId,
+          params: this.sanitizeSwapOrderParamsForLogging(params)
         });
         return result;
       } else {
@@ -147,7 +151,7 @@ export class NearContractService implements IContractService {
           'NEAR swap order creation failed',
           this.escrowContractId,
           'create_swap_order',
-          { status: result.status, params }
+          { status: result.status, params: this.sanitizeSwapOrderParamsForLogging(params) }
         );
       }
     } catch (error) {
@@ -182,16 +186,19 @@ export class NearContractService implements IContractService {
 
       logger.info('Completing NEAR swap order', { orderId });
 
-      const result = await this.nearAccount.functionCall({
+      const args = {
+        order_id: orderId,
+        secret: secret
+      };
+      const safeArgs = this.makeJsonSafe(args);
+
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.escrowContractId,
         methodName: 'complete_swap_order',
-        args: {
-          order_id: orderId,
-          secret: secret
-        },
+        args: safeArgs,
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: BigInt('0')
-      });
+      }));
 
       if (result.status && typeof result.status === 'object' && 'SuccessValue' in result.status) {
         logger.info('NEAR swap order completed successfully', { orderId });
@@ -233,15 +240,16 @@ export class NearContractService implements IContractService {
 
       logger.info('Refunding NEAR swap order', { orderId });
 
-      const result = await this.nearAccount.functionCall({
+      const args = { order_id: orderId };
+      const safeArgs = this.makeJsonSafe(args);
+
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.escrowContractId,
         methodName: 'refund_swap_order',
-        args: {
-          order_id: orderId
-        },
+        args: safeArgs,
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: BigInt('0')
-      });
+      }));
 
       if (result.status && typeof result.status === 'object' && 'SuccessValue' in result.status) {
         logger.info('NEAR swap order refunded successfully', { orderId });
@@ -344,16 +352,19 @@ export class NearContractService implements IContractService {
 
       logger.info('Updating NEAR escrow', { orderId, updates });
 
-      const result = await this.nearAccount.functionCall({
+      const args = {
+        order_id: orderId,
+        updates: updates
+      };
+      const safeArgs = this.makeJsonSafe(args);
+
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.escrowContractId,
         methodName: 'update_escrow',
-        args: {
-          order_id: orderId,
-          updates: updates
-        },
+        args: safeArgs,
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: BigInt('0')
-      });
+      }));
 
       if (result.status && typeof result.status === 'object' && 'SuccessValue' in result.status) {
         logger.info('NEAR escrow updated successfully', { orderId });
@@ -726,18 +737,37 @@ export class NearContractService implements IContractService {
       return args;
     }
 
-    const sanitized = { ...args };
+    // First make JSON-safe (convert BigInt to strings recursively)
+    const sanitized = this.makeJsonSafe({ ...args });
     
     // Remove or redact sensitive fields
-    if (sanitized.secret) {
-      sanitized.secret = '***redacted***';
+    if ((sanitized as any).secret) {
+      (sanitized as any).secret = '***redacted***';
     }
     
-    if (sanitized.private_key) {
-      sanitized.private_key = '***redacted***';
+    if ((sanitized as any).private_key) {
+      (sanitized as any).private_key = '***redacted***';
     }
 
     return sanitized;
+  }
+
+  // Recursively convert any BigInt values to strings so args are JSON-serializable
+  private makeJsonSafe(value: any): any {
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    if (Array.isArray(value)) {
+      return value.map((v) => this.makeJsonSafe(v));
+    }
+    if (value && typeof value === 'object') {
+      const out: Record<string, any> = {};
+      for (const [k, v] of Object.entries(value)) {
+        out[k] = this.makeJsonSafe(v);
+      }
+      return out;
+    }
+    return value;
   }
 
   private sanitizeSwapOrderParamsForLogging(params: NearSwapOrderParams): any {

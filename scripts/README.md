@@ -50,11 +50,11 @@ cp .env.example .env
 ```env
 # Ethereum Configuration
 PRIVATE_KEY=your_ethereum_private_key_here
-ETHEREUM_RPC_URL=https://sepolia.infura.io/v3/YOUR_INFURA_KEY
-ETHEREUM_CHAIN_ID=11155111
+RPC_URL=https://sepolia.infura.io/v3/YOUR_INFURA_KEY
+CHAIN_ID=11155111
 
 # NEAR Configuration  
-NEAR_NETWORK=testnet
+NEAR_NETWORK_ID=testnet
 NEAR_NODE_URL=https://rpc.testnet.near.org
 NEAR_ACCOUNT_ID=your-account.testnet
 NEAR_PRIVATE_KEY=your_near_private_key
@@ -62,7 +62,15 @@ NEAR_PRIVATE_KEY=your_near_private_key
 # Optional
 VERIFY_CONTRACT=false
 EXPLORER_URL=https://sepolia.etherscan.io
-ETHERSCAN_API_KEY=your_etherscan_api_key
+API_KEY=your_etherscan_api_key
+
+# Aliases (optional, used by some scripts)
+ETHEREUM_RPC_URL=
+SEPOLIA_RPC_URL=
+NEAR_RPC_URL=
+NEAR_ESCROW_CONTRACT=
+NEAR_ESCROW_CONTRACT_ID=
+NEAR_BRIDGE=
 ```
 
 ## 🎬 **ONE-CLICK DEMO**

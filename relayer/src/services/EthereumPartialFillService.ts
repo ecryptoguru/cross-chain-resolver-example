@@ -25,17 +25,20 @@ export class EthereumPartialFillService {
   private readonly signer: ethers.Signer;
   private readonly resolverAddress: string;
   private readonly resolverAbi: any[];
+  private readonly ethersLike: any;
   
   constructor(
     provider: ethers.providers.Provider,
     signer: ethers.Signer,
     resolverAddress: string,
-    resolverAbi: any[]
+    resolverAbi: any[],
+    deps?: { ethersLike?: any }
   ) {
     this.provider = provider;
     this.signer = signer;
     this.resolverAddress = resolverAddress;
     this.resolverAbi = resolverAbi;
+    this.ethersLike = deps?.ethersLike ?? ethers;
   }
 
   /**
@@ -45,7 +48,7 @@ export class EthereumPartialFillService {
     try {
       logger.info(`Processing partial fill for order ${params.orderHash}`, { params });
       
-      const resolver = new ethers.Contract(
+      const resolver = new this.ethersLike.Contract(
         this.resolverAddress,
         this.resolverAbi,
         this.signer
@@ -76,7 +79,7 @@ export class EthereumPartialFillService {
     try {
       logger.info(`Splitting order ${orderHash} into ${amounts.length} parts`);
       
-      const resolver = new ethers.Contract(
+      const resolver = new this.ethersLike.Contract(
         this.resolverAddress,
         this.resolverAbi,
         this.signer
@@ -99,7 +102,7 @@ export class EthereumPartialFillService {
     try {
       logger.info(`Processing refund for order ${orderHash} to ${recipient}`);
       
-      const resolver = new ethers.Contract(
+      const resolver = new this.ethersLike.Contract(
         this.resolverAddress,
         this.resolverAbi,
         this.signer
@@ -120,7 +123,7 @@ export class EthereumPartialFillService {
    */
   async getOrderState(orderHash: string): Promise<OrderState> {
     try {
-      const resolver = new ethers.Contract(
+      const resolver = new this.ethersLike.Contract(
         this.resolverAddress,
         this.resolverAbi,
         this.provider
@@ -128,13 +131,45 @@ export class EthereumPartialFillService {
       
       const state = await resolver.getOrderState(orderHash);
       
+      // Support both tuple (array) and object return shapes
+      if (Array.isArray(state)) {
+        const [
+          filledAmount,
+          remainingAmount,
+          fillCount,
+          isFullyFilled,
+          isCancelled,
+          lastFillTimestamp,
+          childOrders,
+        ] = state;
+        return {
+          filledAmount: BigNumber.from(filledAmount).toString(),
+          remainingAmount: BigNumber.from(remainingAmount).toString(),
+          fillCount: typeof fillCount === 'number' ? fillCount : BigNumber.from(fillCount).toNumber(),
+          isFullyFilled: Boolean(isFullyFilled),
+          isCancelled: Boolean(isCancelled),
+          lastFillTimestamp:
+            typeof lastFillTimestamp === 'number'
+              ? lastFillTimestamp
+              : BigNumber.from(lastFillTimestamp).toNumber(),
+          childOrders: Array.isArray(childOrders) ? childOrders : [],
+        };
+      }
+
+      // Object shape
       return {
-        filledAmount: state.filledAmount.toString(),
-        remainingAmount: state.remainingAmount.toString(),
-        fillCount: state.fillCount.toNumber(),
-        isFullyFilled: state.isFullyFilled,
-        isCancelled: state.isCancelled,
-        lastFillTimestamp: state.lastFillTimestamp.toNumber(),
+        filledAmount: BigNumber.from(state.filledAmount).toString(),
+        remainingAmount: BigNumber.from(state.remainingAmount).toString(),
+        fillCount:
+          typeof state.fillCount === 'number'
+            ? state.fillCount
+            : BigNumber.from(state.fillCount).toNumber(),
+        isFullyFilled: Boolean(state.isFullyFilled),
+        isCancelled: Boolean(state.isCancelled),
+        lastFillTimestamp:
+          typeof state.lastFillTimestamp === 'number'
+            ? state.lastFillTimestamp
+            : BigNumber.from(state.lastFillTimestamp).toNumber(),
         childOrders: state.childOrders || [],
       };
     } catch (error) {
@@ -182,7 +217,7 @@ export class EthereumPartialFillService {
    */
   async estimateGasForPartialFill(params: PartialFillParams): Promise<ethers.BigNumber> {
     try {
-      const resolver = new ethers.Contract(
+      const resolver = new this.ethersLike.Contract(
         this.resolverAddress,
         this.resolverAbi,
         this.provider

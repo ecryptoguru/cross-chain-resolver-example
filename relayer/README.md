@@ -1,4 +1,72 @@
 # 🔄 Cross-Chain Relayer: NEAR ↔ Ethereum
+## Hardening Configuration: Concurrency, Retry, and Storage Format
+
+### Programmatic Configuration (Concurrency & Retry)
+
+`EthereumRelayer` accepts runtime options controlling concurrency and retry behavior:
+
+```ts
+type RetryOptions = {
+  retries: number;
+  minDelayMs?: number;
+  maxDelayMs?: number;
+  factor?: number; // exponential backoff factor
+  jitter?: boolean; // add +/- 10% randomness to delay
+  shouldRetry: (error: unknown, attempt: number) => boolean;
+};
+
+interface EthereumRelayerConfig {
+  // ...existing fields
+  concurrencyLimit?: number; // default: 5
+  retry?: {
+    default?: RetryOptions;
+    factoryTx?: RetryOptions; // sending factory tx
+    receipt?: RetryOptions;   // waiting for tx receipt
+    nearCall?: RetryOptions;  // NEAR functionCall
+  };
+}
+```
+
+Example configuration:
+
+```ts
+const relayer = new EthereumRelayer({
+  provider, signer, nearAccount,
+  factoryAddress, bridgeAddress,
+  resolverAddress, resolverAbi,
+  concurrencyLimit: 3,
+  retry: {
+    default: { retries: 3, minDelayMs: 250, maxDelayMs: 3000, factor: 2, jitter: true, shouldRetry: () => true },
+    factoryTx: { retries: 4, minDelayMs: 300, maxDelayMs: 5000, factor: 2, jitter: true, shouldRetry: (e) => /UNPREDICTABLE_GAS_LIMIT|rate limit|nonce|network|ETIMEOUT/i.test((e as any)?.message || '') },
+    receipt:   { retries: 5, minDelayMs: 500, maxDelayMs: 8000, factor: 2, jitter: true, shouldRetry: (e) => /timeout|rpc|ETIMEOUT/i.test((e as any)?.message || '') },
+  }
+});
+```
+
+### Storage Format & Idempotency
+
+The relayer persists message-processing state for idempotency in `storage/*.json`.
+
+- v1 format (legacy):
+  ```json
+  ["msgId1", "msgId2", "msgId3"]
+  ```
+  All entries are implicitly treated as `succeeded`.
+
+- v2 format (current):
+  ```json
+  {
+    "version": 2,
+    "messages": {
+      "msgId1": { "status": "succeeded", "updatedAt": 1720000000000 },
+      "msgId2": { "status": "started",   "updatedAt": 1720000005000 },
+      "msgId3": { "status": "failed",    "updatedAt": 1720000010000, "error": "reason" }
+    }
+  }
+  ```
+
+The service reads both formats. New writes use v2 and track per-message `status` to survive crashes/restarts safely.
+
 
 [![Production Ready](https://img.shields.io/badge/Production-Ready-brightgreen)](./src)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Enterprise-blue)](./src)

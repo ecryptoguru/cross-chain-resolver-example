@@ -685,8 +685,8 @@ class ModernNearToEthTransferTester {
 async function main(): Promise<void> {
   try {
     const config: TestConfig = {
-      ethereumRpcUrl: process.env.ETHEREUM_RPC_URL!,
-      ethereumPrivateKey: process.env.ETHEREUM_PRIVATE_KEY!,
+      ethereumRpcUrl: process.env.SEPOLIA_RPC_URL!,
+      ethereumPrivateKey: process.env.PRIVATE_KEY!,
       nearBridgeAddress: process.env.NEAR_BRIDGE!,
       nearNodeUrl: process.env.NEAR_NODE_URL!,
       nearNetworkId: process.env.NEAR_NETWORK_ID!,

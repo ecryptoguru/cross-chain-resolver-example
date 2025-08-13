@@ -11,8 +11,11 @@ import { ValidationService } from '../services/ValidationService.js';
 import { StorageService } from '../services/StorageService.js';
 import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { DynamicAuctionService, CrossChainAuctionParams } from '../services/DynamicAuctionService.js';
+import { withRetry } from '../utils/retry.js';
+import { DynamicAuctionService, CrossChainAuctionParams, AuctionConfig } from '../services/DynamicAuctionService.js';
 import { EthereumPartialFillService, PartialFillParams } from '../services/EthereumPartialFillService.js';
+import type { RetryOptions } from '../utils/retry.js';
+import { PriceOracleService } from '../services/PriceOracleService.js';
 
 export interface EthereumRelayerConfig {
   provider: ethers.providers.JsonRpcProvider;
@@ -24,6 +27,17 @@ export interface EthereumRelayerConfig {
   resolverAbi?: any[]; // For partial fills
   pollIntervalMs?: number;
   storageDir?: string;
+  // Optional auction configuration to pass into DynamicAuctionService when DI not provided
+  auctionConfig?: AuctionConfig;
+  // New: concurrency control
+  concurrencyLimit?: number;
+  // New: retry policies per external call type
+  retry?: {
+    default?: RetryOptions;
+    factoryTx?: RetryOptions;
+    receipt?: RetryOptions;
+    nearCall?: RetryOptions;
+  };
 }
 
 export class EthereumRelayer implements IMessageProcessor {
@@ -34,11 +48,17 @@ export class EthereumRelayer implements IMessageProcessor {
   private readonly storage: StorageService;
   private readonly auctionService: DynamicAuctionService;
   private readonly partialFillService: EthereumPartialFillService;
+  private readonly priceOracle: PriceOracleService;
   private processedMessages: Set<string> = new Set();
-  private orderStatusMap: Map<string, any> = new Map(); // For tracking order status
+  // In-flight idempotency and simple concurrency control
+  private inFlight: Set<string> = new Set();
+  private activeTasks = 0;
+  private readonly concurrencyLimit: number;
+  private queue: Array<() => void> = [];
   private isRunning = false;
 
-  constructor(config: EthereumRelayerConfig) {
+  // Allow dependency injection for improved testability
+  constructor(config: EthereumRelayerConfig, deps?: { auctionService?: DynamicAuctionService }) {
     this.config = config;
 
     // Initialize services first
@@ -47,7 +67,8 @@ export class EthereumRelayer implements IMessageProcessor {
     // Then validate config
     this.validateConfig(config);
     this.storage = new StorageService(config.storageDir, 'ethereum_processed_messages.json');
-    this.auctionService = new DynamicAuctionService();
+    // Prefer injected auction service; fall back to local construction
+    this.auctionService = deps?.auctionService ?? new DynamicAuctionService();
     this.contractService = new EthereumContractService(
       config.provider,
       config.signer,
@@ -61,6 +82,8 @@ export class EthereumRelayer implements IMessageProcessor {
       config.resolverAddress,
       config.resolverAbi || []
     );
+
+    this.priceOracle = new PriceOracleService();
 
     // Set up event handlers
     const eventHandlers: EthereumEventHandlers = {
@@ -79,6 +102,44 @@ export class EthereumRelayer implements IMessageProcessor {
       eventHandlers,
       config.pollIntervalMs
     );
+
+    // Concurrency
+    this.concurrencyLimit = typeof config.concurrencyLimit === 'number' && config.concurrencyLimit > 0
+      ? Math.floor(config.concurrencyLimit)
+      : 5;
+  }
+
+  /**
+   * Run a task honoring the concurrency limit
+   */
+  private async runWithConcurrency<T>(task: () => Promise<T>): Promise<T> {
+    if (this.activeTasks >= this.concurrencyLimit) {
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    }
+    this.activeTasks++;
+    try {
+      return await task();
+    } finally {
+      this.activeTasks--;
+      const next = this.queue.shift();
+      if (next) next();
+    }
+  }
+
+  /**
+   * Compute a keccak256 hash from an input string using raw bytes.
+   * - If input is a 0x-prefixed hex string, hash its raw bytes
+   * - Otherwise, fall back to UTF-8 bytes (legacy tests/mocks)
+   */
+  private computeSecretHash(input: string): string {
+    try {
+      const isHex = typeof input === 'string' && input.startsWith('0x') && input.length % 2 === 0;
+      const bytes = isHex ? ethers.utils.arrayify(input) : ethers.utils.toUtf8Bytes(input);
+      return ethers.utils.keccak256(bytes);
+    } catch (e) {
+      // As a last resort, attempt direct keccak256 on input (ethers will throw if invalid)
+      return ethers.utils.keccak256(input as unknown as ethers.utils.BytesLike);
+    }
   }
 
   /**
@@ -142,51 +203,67 @@ export class EthereumRelayer implements IMessageProcessor {
    */
   async processMessage(message: DepositMessage | WithdrawalMessage | RefundMessage): Promise<void> {
     try {
-      // Validate message
-      this.validator.validateCrossChainMessage(message);
-
-      // Check if already processed
-      if (this.storage.isMessageProcessed(message.messageId)) {
-        logger.debug('Message already processed, skipping', { messageId: message.messageId });
+      // Basic idempotency: skip already processed or in-flight
+      const persistedStatus = this.storage.getMessageStatus?.(message.messageId);
+      if (this.processedMessages.has(message.messageId) || this.inFlight.has(message.messageId) || persistedStatus === 'succeeded') {
+        logger.debug('Skipping duplicate/in-flight message', { messageId: message.messageId });
         return;
       }
+      this.inFlight.add(message.messageId);
+      await this.storage.markMessageStarted?.(message.messageId);
 
-      logger.info('Processing cross-chain message', {
+      logger.info('Processing message', {
         messageId: message.messageId,
         type: message.type,
         sourceChain: message.sourceChain,
         destChain: message.destChain
       });
 
-      // Route message based on type
-      switch (message.type) {
-        case 'DEPOSIT':
-          await this.processDepositMessage(message as DepositMessage);
-          break;
-        case 'WITHDRAWAL':
-          await this.processWithdrawalMessage(message as WithdrawalMessage);
-          break;
-        case 'REFUND':
-          await this.processRefundMessage(message as RefundMessage);
-          break;
-        default:
-          throw new RelayerError(
-            `Unknown message type: ${(message as any).type}`,
-            'INVALID_MESSAGE_TYPE',
-            { messageId: message.messageId, type: (message as any).type }
-          );
-      }
+      await this.runWithConcurrency(async () => {
+        switch (message.type) {
+          case 'DEPOSIT':
+            await this.processDepositMessage(message as DepositMessage);
+            break;
+          case 'WITHDRAWAL':
+            await this.processWithdrawalMessage(message as WithdrawalMessage);
+            break;
+          case 'REFUND':
+            await this.processRefundMessage(message as RefundMessage);
+            break;
+          default:
+            throw ErrorHandler.createValidationError('message.type', (message as any).type, 'Unsupported message type');
+        }
+      });
 
       // Mark as processed
-      await this.storage.saveProcessedMessage(message.messageId);
+      this.processedMessages.add(message.messageId);
+      if (this.storage.markMessageSucceeded) {
+        await this.storage.markMessageSucceeded(message.messageId);
+      } else {
+        await this.storage.saveProcessedMessage(message.messageId);
+      }
 
-      logger.info('Message processed successfully', { messageId: message.messageId });
+      logger.info('Message processed successfully', {
+        messageId: message.messageId,
+        type: message.type
+      });
     } catch (error) {
+      // mark failed for crash resilience
+      if (this.storage.markMessageFailed) {
+        await this.storage.markMessageFailed(message.messageId, (error as Error)?.message);
+      }
       throw ErrorHandler.handleAndRethrow(
         error as Error,
         `Failed to process message: ${message.messageId}`,
-        { messageId: message.messageId, messageType: message.type }
+        {
+          type: message.type,
+          sourceChain: message.sourceChain,
+          destChain: message.destChain
+        }
       );
+    }
+    finally {
+      this.inFlight.delete(message.messageId);
     }
   }
 
@@ -210,8 +287,8 @@ export class EthereumRelayer implements IMessageProcessor {
       });
 
       // Create NEAR escrow for ETH→NEAR cross-chain transfer
-      // Generate consistent secret hash for cross-chain transfer
-      const secretHash = ethers.utils.keccak256(event.depositId);
+      // Generate consistent secret hash for cross-chain transfer using raw bytes
+      const secretHash = this.computeSecretHash(event.depositId);
       
       await this.createNearEscrowFromEthOrder(
         event.sender,
@@ -357,26 +434,124 @@ export class EthereumRelayer implements IMessageProcessor {
 
   private async processDepositMessage(message: DepositMessage): Promise<void> {
     try {
-      logger.info('Processing deposit message', {
+      logger.info('Processing deposit message', { 
         messageId: message.messageId,
-        sender: message.sender,
-        recipient: message.recipient,
+        depositId: message.data.txHash,
+        fromChain: message.sourceChain,
+        toChain: message.destChain,
         amount: message.amount
       });
 
-      // Create escrow on Ethereum side
-      // Implementation depends on specific bridge contract
-      // This is a placeholder for the actual implementation
-      
-      logger.info('Deposit message processed successfully', {
-        messageId: message.messageId
-      });
-    } catch (error) {
-      throw ErrorHandler.handleAndRethrow(
-        error as Error,
-        'Failed to process deposit message',
-        { messageId: message.messageId }
+      // Validate required fields
+      if (!message.data.secretHash) {
+        throw new Error('Missing required field: secretHash');
+      }
+
+      // Calculate auction parameters using DynamicAuctionService
+      const auctionParams = {
+        fromChain: 'NEAR' as const,
+        toChain: 'ETH' as const,
+        fromAmount: message.amount,
+        baseExchangeRate: await this.getExchangeRate('NEAR', 'ETH'),
+        startTime: Math.floor(Date.now() / 1000),
+        orderId: message.data.txHash
+      };
+
+      // Validate runtime auction parameters
+      this.validator.validateAuctionRuntimeParams(auctionParams);
+
+      // Get current auction rate and output amount (use optional auction config overrides)
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams, this.config.auctionConfig);
+
+      // Compute precise ETH values using BigNumber to avoid precision loss
+      const ethAmountWei = ethers.utils.parseEther(auctionResult.outputAmount);
+      const safetyDepositWei = ethers.utils.parseEther(auctionResult.feeAmount);
+      const totalEthValueToSend = ethAmountWei.add(safetyDepositWei);
+
+      // Build factory immutables for createDstEscrow
+      const maker = await this.contractService.getSignerAddress();
+      const taker = message.recipient;
+      const token = ethers.constants.AddressZero; // Native ETH
+      const orderHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(message.data.txHash));
+      const timelocks = ethers.BigNumber.from(message.data.timelock);
+      const dstImmutables = [
+        orderHash,
+        message.data.secretHash,
+        maker,
+        taker,
+        token,
+        ethAmountWei,
+        safetyDepositWei,
+        timelocks
+      ];
+
+      // Source side cancellation timestamp (fallback to same timelock window)
+      const srcCancellationTimestamp = timelocks;
+
+      // Create destination escrow on Ethereum factory
+      const escrowTx = await withRetry(
+        () => this.contractService.executeFactoryTransaction(
+          'createDstEscrow',
+          [dstImmutables, srcCancellationTimestamp],
+          totalEthValueToSend
+        ),
+        this.config.retry?.factoryTx ?? this.config.retry?.default ?? {
+          retries: 3,
+          shouldRetry: (err) => {
+            const msg = (err as any)?.message || '';
+            return /UNPREDICTABLE_GAS_LIMIT|ETIMEOUT|temporar|rate limit|nonce|replacement|network/i.test(msg);
+          }
+        }
       );
+
+      // Wait for transaction confirmation
+      const receipt = await withRetry(
+        () => escrowTx.wait(),
+        this.config.retry?.receipt ?? this.config.retry?.default ?? {
+          retries: 3,
+          shouldRetry: (err) => /timeout|ETIMEOUT|rpc/i.test((err as any)?.message || '')
+        }
+      );
+      
+      // Extract escrow address from event logs
+      const escrowCreatedEvent = receipt.events?.find(
+        (e: any) => e.event === 'DstEscrowCreated'
+      );
+      
+      if (!escrowCreatedEvent) {
+        throw new Error('EscrowCreated event not found in transaction receipt');
+      }
+
+      const escrowAddress = escrowCreatedEvent.args?.escrow;
+      
+      // Update order status
+      await this.updateOrderStatus(message.data.txHash, 'escrow_created', {
+        escrowAddress,
+        transactionHash: receipt.transactionHash,
+        timestamp: new Date().toISOString()
+      });
+
+      logger.info('Successfully processed deposit message', {
+        messageId: message.messageId,
+        escrowAddress,
+        transactionHash: receipt.transactionHash
+      });
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to process deposit message', {
+        messageId: message.messageId,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      // Update order status with error
+      await this.updateOrderStatus(message.data.txHash, 'error', {
+        error: errorMessage,
+        timestamp: new Date().toISOString()
+      });
+
+      throw error;
     }
   }
 
@@ -388,9 +563,9 @@ export class EthereumRelayer implements IMessageProcessor {
         amount: message.amount
       });
 
-      // Find and execute withdrawal on Ethereum escrow
+      // Find and execute withdrawal on Ethereum escrow using consistent raw-bytes hash
       const escrow = await this.contractService.findEscrowByParams({
-        secretHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(message.secret))
+        secretHash: this.computeSecretHash(message.secret)
       });
 
       if (!escrow) {
@@ -486,8 +661,11 @@ export class EthereumRelayer implements IMessageProcessor {
         orderId: orderId
       };
       
-      // Calculate current auction rate and amounts
-      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams);
+      // Validate runtime auction parameters
+      this.validator.validateAuctionRuntimeParams(auctionParams);
+
+      // Calculate current auction rate and amounts (use optional auction config overrides)
+      const auctionResult = this.auctionService.calculateCurrentRate(auctionParams, this.config.auctionConfig);
       const nearAmountYocto = ethers.BigNumber.from(auctionResult.outputAmount);
       const feeAmount = ethers.BigNumber.from(auctionResult.feeAmount);
       const totalNearValue = ethers.BigNumber.from(auctionResult.totalCost);
@@ -503,7 +681,7 @@ export class EthereumRelayer implements IMessageProcessor {
       });
 
       // Call NEAR contract to create escrow with relayer's NEAR liquidity
-      const result = await this.config.nearAccount.functionCall({
+      const result = await withRetry(() => this.config.nearAccount.functionCall({
         contractId: process.env.NEAR_ESCROW_CONTRACT_ID!,
         methodName: 'create_swap_order',
         args: {
@@ -515,7 +693,7 @@ export class EthereumRelayer implements IMessageProcessor {
         },
         gas: BigInt('30000000000000'), // 30 TGas
         attachedDeposit: nearAmountYocto.toBigInt() // Relayer provides NEAR liquidity
-      });
+      }), this.config.retry?.nearCall ?? this.config.retry?.default ?? { retries: 3, shouldRetry: () => true });
 
       logger.info('NEAR escrow created successfully for ETH→NEAR transfer', {
         ethereumSender,
@@ -583,8 +761,8 @@ export class EthereumRelayer implements IMessageProcessor {
       }
 
       // Generate consistent secret hash for cross-chain transfer
-      // Use escrow address as unique identifier for the transfer
-      const secretHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(event.escrow));
+      // Use escrow address as unique identifier, hashed using raw bytes (address hex)
+      const secretHash = this.computeSecretHash(event.escrow);
       
       // Create NEAR escrow with relayer's NEAR liquidity
       await this.createNearEscrowFromEthOrder(
@@ -712,13 +890,12 @@ export class EthereumRelayer implements IMessageProcessor {
         timestamp: Date.now()
       });
 
-      // 4. Update local order status tracking
-      this.orderStatusMap.set(event.orderHash, {
-        status: orderState.isFullyFilled ? 'FULLY_FILLED' : 'PARTIALLY_FILLED',
-        lastUpdated: Date.now(),
-        fillCount: orderState.fillCount,
-        filledAmount: orderState.filledAmount
-      });
+      // 4. Persist order status tracking
+      await this.updateOrderStatus(
+        event.orderHash,
+        orderState.isFullyFilled ? 'FULLY_FILLED' : 'PARTIALLY_FILLED',
+        { fillCount: orderState.fillCount, filledAmount: orderState.filledAmount }
+      );
       
       logger.info('Cross-chain partial fill notification processed successfully', {
         orderHash: event.orderHash,
@@ -790,7 +967,10 @@ export class EthereumRelayer implements IMessageProcessor {
 
       // Implement cross-chain coordination for refunds
       // 1. Verify the refund on Ethereum
-      const orderState = await this.partialFillService.getOrderState(event.orderHash);
+      const orderState = await withRetry(
+        () => this.partialFillService.getOrderState(event.orderHash),
+        this.config.retry?.default || { retries: 3, minDelayMs: 500, maxDelayMs: 5000, factor: 1.8, jitter: true }
+      );
       if (!orderState) {
         logger.warn(`Order state not found for refund: ${event.orderHash}`);
       }
@@ -836,18 +1016,15 @@ export class EthereumRelayer implements IMessageProcessor {
         metadata
       });
 
-      // TODO: Implement actual order status tracking
-      // This would involve:
-      // 1. Updating local database/storage
-      // 2. Emitting status change events
-      // 3. Notifying relevant services
-      
-      // For now, use in-memory storage
-      this.orderStatusMap.set(orderHash, {
-        status,
-        updatedAt: Date.now(),
-        metadata
-      });
+      // Persist via StorageService for durability across restarts
+      const normalized = String(status).toUpperCase();
+      if (normalized.includes('FAILED') || normalized === 'REFUNDED') {
+        await this.storage.markMessageFailed(orderHash, metadata?.reason || metadata?.error);
+      } else if (normalized.includes('PARTIALLY_FILLED') || normalized.includes('FULLY_FILLED') || normalized === 'COMPLETED' || normalized === 'SUCCEEDED') {
+        await this.storage.markMessageSucceeded(orderHash);
+      } else {
+        await this.storage.markMessageStarted(orderHash);
+      }
 
       logger.debug('Order status updated successfully', {
         orderHash,
@@ -883,5 +1060,33 @@ export class EthereumRelayer implements IMessageProcessor {
 
     this.validator.validateEthereumAddress(config.factoryAddress);
     this.validator.validateEthereumAddress(config.bridgeAddress);
+
+    // If provided, validate auction configuration early to surface misconfigurations
+    if (config.auctionConfig) {
+      this.validator.validateAuctionConfig(config.auctionConfig);
+      logger.debug('Auction configuration validated');
+    }
+  }
+
+  /**
+   * Get exchange rate between two chains
+   * This is a placeholder implementation - in production, this would
+   * integrate with price oracles or exchange rate APIs
+   */
+  private async getExchangeRate(fromChain: string, toChain: string): Promise<number> {
+    try {
+      logger.debug('Getting exchange rate', { fromChain, toChain });
+      
+      const res = await this.priceOracle.getRate({ from: fromChain, to: toChain });
+      logger.debug('Exchange rate retrieved', { fromChain, toChain, rate: res.rate, source: res.source });
+      return res.rate;
+    } catch (error) {
+      logger.error('Failed to get exchange rate', {
+        fromChain,
+        toChain,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return 1; // safe fallback
+    }
   }
 }

@@ -35,6 +35,26 @@ const NearConfigSchema = z.object({
   }).optional()
 });
 
+// Auction configuration schema (for DynamicAuctionService)
+const AuctionPointSchema = z.object({
+  delay: z.number().min(0),
+  coefficient: z.number().int()
+});
+
+const AuctionConfigSchema = z.object({
+  duration: z.number().min(30).max(1800).default(180),
+  initialRateBump: z.number().int().default(50000),
+  points: z.array(AuctionPointSchema).nonempty().default([
+    { delay: 30, coefficient: 40000 },
+    { delay: 60, coefficient: 30000 },
+    { delay: 90, coefficient: 20000 }
+  ]),
+  gasBumpEstimate: z.number().int().default(5000),
+  gasPriceEstimate: z.number().min(0).default(20),
+  minFillPercentage: z.number().min(0).max(1).optional().default(0.1),
+  maxRateBump: z.number().int().optional().default(500000)
+});
+
 const EthereumConfigSchema = z.object({
   network: NetworkConfigSchema,
   privateKey: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
@@ -91,6 +111,7 @@ const MainConfigSchema = z.object({
   near: NearConfigSchema,
   ethereum: EthereumConfigSchema,
   relayer: RelayerConfigSchema,
+  auction: AuctionConfigSchema.optional(),
   security: SecurityConfigSchema.optional(),
   monitoring: MonitoringConfigSchema.optional()
 });
@@ -99,6 +120,7 @@ export type Configuration = z.infer<typeof MainConfigSchema>;
 export type NearConfig = z.infer<typeof NearConfigSchema>;
 export type EthereumConfig = z.infer<typeof EthereumConfigSchema>;
 export type RelayerConfig = z.infer<typeof RelayerConfigSchema>;
+export type AuctionConfig = z.infer<typeof AuctionConfigSchema>;
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
 export type MonitoringConfig = z.infer<typeof MonitoringConfigSchema>;
 
@@ -189,17 +211,13 @@ export class ConfigurationService extends EventEmitter {
     return this.getConfig().relayer;
   }
 
-  public getSecurityConfig(): Partial<SecurityConfig> {
-    return this.getConfig().security || {};
-  }
-
-  public getMonitoringConfig(): MonitoringConfig {
-    return this.getConfig().monitoring || {};
-  }
-
   /**
-   * Enable hot-reloading of configuration
+   * Get auction configuration (if provided)
    */
+  public getAuctionConfig(): AuctionConfig | undefined {
+    return this.getConfig().auction;
+  }
+
   public enableHotReload(): void {
     if (this.watching) {
       logger.warn('Hot reload already enabled');
@@ -339,6 +357,19 @@ export class ConfigurationService extends EventEmitter {
         enableMetrics: false,
         metricsPort: 3001
       },
+      auction: {
+        duration: 180,
+        initialRateBump: 50000,
+        points: [
+          { delay: 30, coefficient: 40000 },
+          { delay: 60, coefficient: 30000 },
+          { delay: 90, coefficient: 20000 }
+        ],
+        gasBumpEstimate: 5000,
+        gasPriceEstimate: 20,
+        minFillPercentage: 0.1,
+        maxRateBump: 500000
+      },
       security: {
         enableTeeValidation: true,
         allowedTeeTypes: ['SGX'],
@@ -435,6 +466,42 @@ export class ConfigurationService extends EventEmitter {
     if (process.env.POLLING_INTERVAL) envOverrides.relayer = { ...envOverrides.relayer, pollingInterval: parseInt(process.env.POLLING_INTERVAL) };
     if (process.env.STORAGE_DIR) envOverrides.relayer = { ...envOverrides.relayer, storageDir: process.env.STORAGE_DIR };
     if (process.env.LOG_LEVEL) envOverrides.relayer = { ...envOverrides.relayer, logLevel: process.env.LOG_LEVEL };
+
+    // Auction configuration overrides
+    if (process.env.AUCTION_DURATION) {
+      const v = parseInt(process.env.AUCTION_DURATION);
+      if (!Number.isNaN(v)) envOverrides.auction = { ...envOverrides.auction, duration: v };
+    }
+    if (process.env.AUCTION_INITIAL_RATE_BUMP) {
+      const v = parseInt(process.env.AUCTION_INITIAL_RATE_BUMP);
+      if (!Number.isNaN(v)) envOverrides.auction = { ...envOverrides.auction, initialRateBump: v };
+    }
+    if (process.env.AUCTION_POINTS) {
+      try {
+        const pts = JSON.parse(process.env.AUCTION_POINTS);
+        if (Array.isArray(pts)) {
+          envOverrides.auction = { ...envOverrides.auction, points: pts };
+        }
+      } catch {
+        // ignore invalid JSON; validation will catch later
+      }
+    }
+    if (process.env.AUCTION_GAS_BUMP_ESTIMATE) {
+      const v = parseInt(process.env.AUCTION_GAS_BUMP_ESTIMATE);
+      if (!Number.isNaN(v)) envOverrides.auction = { ...envOverrides.auction, gasBumpEstimate: v };
+    }
+    if (process.env.AUCTION_GAS_PRICE_ESTIMATE) {
+      const v = Number(process.env.AUCTION_GAS_PRICE_ESTIMATE);
+      if (!Number.isNaN(v)) envOverrides.auction = { ...envOverrides.auction, gasPriceEstimate: v };
+    }
+    if (process.env.AUCTION_MIN_FILL_PERCENTAGE) {
+      const v = Number(process.env.AUCTION_MIN_FILL_PERCENTAGE);
+      if (!Number.isNaN(v)) envOverrides.auction = { ...envOverrides.auction, minFillPercentage: v };
+    }
+    if (process.env.AUCTION_MAX_RATE_BUMP) {
+      const v = parseInt(process.env.AUCTION_MAX_RATE_BUMP);
+      if (!Number.isNaN(v)) envOverrides.auction = { ...envOverrides.auction, maxRateBump: v };
+    }
 
     return this.deepMerge(config, envOverrides);
   }

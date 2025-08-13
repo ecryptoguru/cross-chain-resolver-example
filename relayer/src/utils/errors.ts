@@ -5,6 +5,37 @@
 
 import { logger } from './logger.js';
 
+// Normalize error detail objects to be JSON-serializable
+function normalizeDetails(value: any, seen = new WeakSet()): any {
+  const t = typeof value;
+  if (value == null || t === 'string' || t === 'number' || t === 'boolean') return value;
+  if (t === 'bigint') return value.toString();
+  if (t === 'function') return `[Function ${value.name || 'anonymous'}]`;
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+  // ethers BigNumber detection without import
+  if (value && typeof value === 'object' && (value as any)._isBigNumber) {
+    try { return (value as any).toString(); } catch { return `${value}`; }
+  }
+  if (Array.isArray(value)) return value.map((v) => normalizeDetails(v, seen));
+  if (t === 'object') {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = normalizeDetails(v, seen);
+    }
+    return out;
+  }
+  return value;
+}
+
 // Base error class for all relayer errors
 export class RelayerError extends Error {
   public readonly code: string;
@@ -27,7 +58,7 @@ export class RelayerError extends Error {
       name: this.name,
       message: this.message,
       code: this.code,
-      details: this.details,
+      details: normalizeDetails(this.details),
       timestamp: this.timestamp.toISOString(),
       stack: this.stack
     };
@@ -129,19 +160,19 @@ export class ErrorHandler {
     const contextMsg = context ? `[${context}] ` : '';
     
     if (error instanceof RelayerError) {
-      // Log structured relayer errors with full details
+      // Log structured relayer errors with normalized details
       logger.error(`${contextMsg}${error.message}`, {
         code: error.code,
-        details: error.details,
+        details: normalizeDetails(error.details),
         timestamp: error.timestamp,
         stack: error.stack
       });
     } else {
       // Log generic errors
-      logger.error(`${contextMsg}${error.message}`, {
+      logger.error(`${contextMsg}${error.message}`, normalizeDetails({
         name: error.name,
         stack: error.stack
-      });
+      }));
     }
   }
 
@@ -153,7 +184,7 @@ export class ErrorHandler {
     
     if (error instanceof RelayerError) {
       // Add context to existing relayer error
-      const enhancedDetails = { ...error.details, context, ...additionalDetails };
+      const enhancedDetails = normalizeDetails({ ...error.details, context, ...additionalDetails });
       throw new RelayerError(
         `${context}: ${error.message}`,
         error.code,
@@ -164,7 +195,7 @@ export class ErrorHandler {
       throw new RelayerError(
         `${context}: ${error.message}`,
         'WRAPPED_ERROR',
-        { originalError: error.name, context, ...additionalDetails }
+        normalizeDetails({ originalError: error.name, context, ...additionalDetails })
       );
     }
   }
