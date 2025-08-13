@@ -15,6 +15,7 @@ import { withRetry } from '../utils/retry.js';
 import { DynamicAuctionService, CrossChainAuctionParams, AuctionConfig } from '../services/DynamicAuctionService.js';
 import { EthereumPartialFillService, PartialFillParams } from '../services/EthereumPartialFillService.js';
 import type { RetryOptions } from '../utils/retry.js';
+import { PriceOracleService } from '../services/PriceOracleService.js';
 
 export interface EthereumRelayerConfig {
   provider: ethers.providers.JsonRpcProvider;
@@ -47,13 +48,13 @@ export class EthereumRelayer implements IMessageProcessor {
   private readonly storage: StorageService;
   private readonly auctionService: DynamicAuctionService;
   private readonly partialFillService: EthereumPartialFillService;
+  private readonly priceOracle: PriceOracleService;
   private processedMessages: Set<string> = new Set();
   // In-flight idempotency and simple concurrency control
   private inFlight: Set<string> = new Set();
   private activeTasks = 0;
   private readonly concurrencyLimit: number;
   private queue: Array<() => void> = [];
-  private orderStatusMap: Map<string, any> = new Map(); // For tracking order status
   private isRunning = false;
 
   // Allow dependency injection for improved testability
@@ -81,6 +82,8 @@ export class EthereumRelayer implements IMessageProcessor {
       config.resolverAddress,
       config.resolverAbi || []
     );
+
+    this.priceOracle = new PriceOracleService();
 
     // Set up event handlers
     const eventHandlers: EthereumEventHandlers = {
@@ -887,13 +890,12 @@ export class EthereumRelayer implements IMessageProcessor {
         timestamp: Date.now()
       });
 
-      // 4. Update local order status tracking
-      this.orderStatusMap.set(event.orderHash, {
-        status: orderState.isFullyFilled ? 'FULLY_FILLED' : 'PARTIALLY_FILLED',
-        lastUpdated: Date.now(),
-        fillCount: orderState.fillCount,
-        filledAmount: orderState.filledAmount
-      });
+      // 4. Persist order status tracking
+      await this.updateOrderStatus(
+        event.orderHash,
+        orderState.isFullyFilled ? 'FULLY_FILLED' : 'PARTIALLY_FILLED',
+        { fillCount: orderState.fillCount, filledAmount: orderState.filledAmount }
+      );
       
       logger.info('Cross-chain partial fill notification processed successfully', {
         orderHash: event.orderHash,
@@ -965,7 +967,10 @@ export class EthereumRelayer implements IMessageProcessor {
 
       // Implement cross-chain coordination for refunds
       // 1. Verify the refund on Ethereum
-      const orderState = await this.partialFillService.getOrderState(event.orderHash);
+      const orderState = await withRetry(
+        () => this.partialFillService.getOrderState(event.orderHash),
+        this.config.retry?.default || { retries: 3, minDelayMs: 500, maxDelayMs: 5000, factor: 1.8, jitter: true }
+      );
       if (!orderState) {
         logger.warn(`Order state not found for refund: ${event.orderHash}`);
       }
@@ -1011,18 +1016,15 @@ export class EthereumRelayer implements IMessageProcessor {
         metadata
       });
 
-      // TODO: Implement actual order status tracking
-      // This would involve:
-      // 1. Updating local database/storage
-      // 2. Emitting status change events
-      // 3. Notifying relevant services
-      
-      // For now, use in-memory storage
-      this.orderStatusMap.set(orderHash, {
-        status,
-        updatedAt: Date.now(),
-        metadata
-      });
+      // Persist via StorageService for durability across restarts
+      const normalized = String(status).toUpperCase();
+      if (normalized.includes('FAILED') || normalized === 'REFUNDED') {
+        await this.storage.markMessageFailed(orderHash, metadata?.reason || metadata?.error);
+      } else if (normalized.includes('PARTIALLY_FILLED') || normalized.includes('FULLY_FILLED') || normalized === 'COMPLETED' || normalized === 'SUCCEEDED') {
+        await this.storage.markMessageSucceeded(orderHash);
+      } else {
+        await this.storage.markMessageStarted(orderHash);
+      }
 
       logger.debug('Order status updated successfully', {
         orderHash,
@@ -1075,38 +1077,16 @@ export class EthereumRelayer implements IMessageProcessor {
     try {
       logger.debug('Getting exchange rate', { fromChain, toChain });
       
-      // Hardcoded exchange rates for testing
-      // In production, this would fetch from oracles like Chainlink, Band Protocol, etc.
-      const exchangeRates: Record<string, Record<string, number>> = {
-        'NEAR': {
-          'ETH': 0.001, // 1 NEAR = 0.001 ETH (approximate)
-          'USD': 2.5    // 1 NEAR = $2.5 (approximate)
-        },
-        'ETH': {
-          'NEAR': 1000, // 1 ETH = 1000 NEAR (approximate)
-          'USD': 2500   // 1 ETH = $2500 (approximate)
-        }
-      };
-      
-      const rate = exchangeRates[fromChain]?.[toChain];
-      
-      if (!rate) {
-        logger.warn('Exchange rate not found, using default', { fromChain, toChain });
-        return 1; // Default 1:1 rate
-      }
-      
-      logger.debug('Exchange rate retrieved', { fromChain, toChain, rate });
-      return rate;
-      
+      const res = await this.priceOracle.getRate({ from: fromChain, to: toChain });
+      logger.debug('Exchange rate retrieved', { fromChain, toChain, rate: res.rate, source: res.source });
+      return res.rate;
     } catch (error) {
       logger.error('Failed to get exchange rate', {
         fromChain,
         toChain,
         error: error instanceof Error ? error.message : String(error)
       });
-      
-      // Return default rate on error
-      return 1;
+      return 1; // safe fallback
     }
   }
 }

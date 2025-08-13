@@ -1,4 +1,13 @@
-[
-  "deposit-duplicate",
-  "test-withdraw-1"
-]
+{
+  "version": 2,
+  "messages": {
+    "test-withdraw-1": {
+      "status": "succeeded",
+      "updatedAt": 1754980987065
+    },
+    "deposit-duplicate": {
+      "status": "succeeded",
+      "updatedAt": 1754980987089
+    }
+  }
+}

@@ -7,6 +7,7 @@ import { ethers } from 'ethers';
 
 import { NetworkError, ContractError, ErrorHandler, ValidationError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { withRetry } from '../utils/retry.js';
 
 // ABI definitions for contracts
 const EscrowFactoryABI = [
@@ -134,7 +135,7 @@ export class EthereumEventListener {
     try {
       // Fetch current block; if it fails, log and start from 0 to allow polling to handle errors
       try {
-        this.lastProcessedBlock = await this.provider.getBlockNumber();
+        this.lastProcessedBlock = await withRetry(() => this.provider.getBlockNumber());
       } catch (error) {
         logger.warn('Failed to fetch current Ethereum block on start; starting from 0', {
           error: error instanceof Error ? error.message : String(error)
@@ -236,7 +237,7 @@ export class EthereumEventListener {
 
   private async pollForEvents(): Promise<void> {
     try {
-      const currentBlock = await this.provider.getBlockNumber();
+      const currentBlock = await withRetry(() => this.provider.getBlockNumber());
       // include current block on first poll to capture events mocked at start block
       const fromBlock = this.hasPolled ? this.lastProcessedBlock + 1 : this.lastProcessedBlock;
       const toBlock = currentBlock;
@@ -592,7 +593,7 @@ export class EthereumEventListener {
     const providerAny = this.provider as any;
     if (providerAny && typeof providerAny.queryFilter === 'function') {
       try {
-        let events = await providerAny.queryFilter(filter, fromBlock, toBlock);
+        let events = await withRetry(() => providerAny.queryFilter(filter, fromBlock, toBlock));
         if ((events as any[])?.length) {
           const addr = (contract?.address as string | undefined)?.toLowerCase();
           if (addr) {
@@ -610,7 +611,7 @@ export class EthereumEventListener {
     }
 
     try {
-      let events = await contract.queryFilter(filter, fromBlock, toBlock);
+      let events = await withRetry(() => contract.queryFilter(filter, fromBlock, toBlock));
       if ((events as any[])?.length) {
         const addr = (contract?.address as string | undefined)?.toLowerCase();
         if (addr) {
@@ -628,7 +629,7 @@ export class EthereumEventListener {
 
     try {
       // Attempt getLogs with full filter
-      const logs = await this.provider.getLogs({ ...(filter as any), fromBlock, toBlock } as any);
+      const logs = await withRetry(() => this.provider.getLogs({ ...(filter as any), fromBlock, toBlock } as any));
       if ((logs as any[])?.length) {
         const expectedTopic0 = Array.isArray((filter as any)?.topics?.[0])
           ? (filter as any).topics[0][0]
@@ -646,7 +647,7 @@ export class EthereumEventListener {
 
     try {
       // Fallback: address-only filter to accommodate tests without topics in mock events
-      const addressOnlyLogs = await this.provider.getLogs({ address: contract.address, fromBlock, toBlock } as any);
+      const addressOnlyLogs = await withRetry(() => this.provider.getLogs({ address: contract.address, fromBlock, toBlock } as any));
       if ((addressOnlyLogs as any[])?.length) {
         const expectedTopic0 = Array.isArray((filter as any)?.topics?.[0])
           ? (filter as any).topics[0][0]
@@ -736,11 +737,11 @@ export class EthereumEventListener {
     }
     try {
       if (typeof event.getBlock === 'function') {
-        const blk = await event.getBlock();
-        if (blk?.timestamp !== undefined) return this.toBigIntSafe(blk.timestamp);
+        const blk = await withRetry(() => event.getBlock()) as ethers.providers.Block;
+        if ((blk as any)?.timestamp !== undefined) return this.toBigIntSafe((blk as any).timestamp);
       }
     } catch { /* ignore */ }
-    const block = await this.provider.getBlock(event.blockNumber);
-    return this.toBigIntSafe(block.timestamp);
+    const block = await withRetry(() => this.provider.getBlock(event.blockNumber)) as ethers.providers.Block;
+    return this.toBigIntSafe((block as any).timestamp);
   }
 }

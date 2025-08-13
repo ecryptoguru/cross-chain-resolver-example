@@ -16,7 +16,8 @@ dotenv.config();
 const requiredEnvVars = [
   'ETHEREUM_RPC_URL',
   'ETHEREUM_CHAIN_ID',
-  'DEPLOYER_PRIVATE_KEY',
+  // Prefer unified ETHEREUM_PRIVATE_KEY; support legacy DEPLOYER_PRIVATE_KEY for now
+  process.env.DEPLOYER_PRIVATE_KEY ? 'DEPLOYER_PRIVATE_KEY' : 'ETHEREUM_PRIVATE_KEY',
   'NEAR_NETWORK_ID',
   'NEAR_NODE_URL',
   'NEAR_RELAYER_ACCOUNT_ID',
@@ -40,7 +41,15 @@ export async function main(deps?: {
     // Initialize Ethereum provider and signer
     const E = deps?.Ethers ?? { providers, Wallet };
     const ethereumProvider = new E.providers.JsonRpcProvider(process.env.ETHEREUM_RPC_URL);
-    const ethereumSigner = new E.Wallet(process.env.DEPLOYER_PRIVATE_KEY!, ethereumProvider);
+    // Prefer ETHEREUM_PRIVATE_KEY; fallback to legacy DEPLOYER_PRIVATE_KEY with warning
+    const ethPrivKey = process.env.ETHEREUM_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY;
+    if (!ethPrivKey) {
+      throw new Error('ETHEREUM_PRIVATE_KEY is required (DEPLOYER_PRIVATE_KEY is deprecated but supported temporarily).');
+    }
+    if (process.env.DEPLOYER_PRIVATE_KEY && !process.env.ETHEREUM_PRIVATE_KEY) {
+      logger.warn('DEPLOYER_PRIVATE_KEY is deprecated. Please set ETHEREUM_PRIVATE_KEY to avoid future breakage.');
+    }
+    const ethereumSigner = new E.Wallet(ethPrivKey, ethereumProvider);
     logger.info(`Connected to Ethereum network: ${await ethereumProvider.getNetwork().then((n: any) => n.name)} (${process.env.ETHEREUM_CHAIN_ID})`);
     logger.info(`Ethereum relayer address: ${await ethereumSigner.getAddress()}`);
 

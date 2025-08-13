@@ -412,25 +412,54 @@ interface ScriptConfig {
 
 ### Environment Variables
 ```bash
-# Network Configuration
-NEAR_NETWORK_ID=testnet
-NEAR_RPC_URL=https://rpc.testnet.near.org
-ETHEREUM_RPC_URL=https://sepolia.infura.io/v3/...
+# --- Ethereum (global for scripts) ---
+PRIVATE_KEY=                         # required by most scripts
+RPC_URL=https://sepolia.infura.io/v3/<KEY>
+CHAIN_ID=11155111                    # default: 11155111 (Sepolia)
+VERIFY_CONTRACT=false
+EXPLORER_URL=https://sepolia.etherscan.io
+API_KEY=                             # explorer API key (for verification)
 
-# Account Configuration
+# Optional deployment params
+INITIAL_OWNER=                       # owner for escrow factory (defaults to deployer)
+CREATE_SAMPLE_ESCROW=false           # set 'true' to create a sample escrow after deploy
+
+# Aliases used by some test scripts (optional)
+ETHEREUM_RPC_URL=                    # treated as RPC_URL if provided
+SEPOLIA_RPC_URL=                     # treated as RPC_URL if provided
+# Precedence note: If RPC_URL is unset, some scripts may fall back to
+# ETHEREUM_RPC_URL or SEPOLIA_RPC_URL where applicable. Prefer setting RPC_URL
+# for consistency unless a script explicitly documents otherwise.
+
+# --- NEAR ---
+NEAR_NETWORK_ID=testnet
+NEAR_NODE_URL=https://rpc.testnet.near.org
+NEAR_RPC_URL=https://rpc.testnet.near.org   # alias used by monitor script
 NEAR_ACCOUNT_ID=your-account.testnet
 NEAR_PRIVATE_KEY=ed25519:...
-ETHEREUM_PRIVATE_KEY=0x...
 
-# Contract Addresses
-NEAR_ESCROW_CONTRACT=escrow.testnet
-ETHEREUM_FACTORY_ADDRESS=0x...
-ETHEREUM_BRIDGE_ADDRESS=0x...
+# --- Contracts ---
+NEAR_ESCROW_CONTRACT=escrow-v2.fusionswap.testnet
+NEAR_ESCROW_CONTRACT_ID=escrow-v2.fusionswap.testnet   # alias used by some tests
+NEAR_BRIDGE=0x0000000000000000000000000000000000000000 # Ethereum bridge contract address
 
-# Script Configuration
-SCRIPT_LOG_LEVEL=info
-SCRIPT_TIMEOUT=300000
-SCRIPT_RETRY_COUNT=3
+# --- Test Parameters ---
+# NEAR → ETH
+ETH_RECIPIENT=0x0000000000000000000000000000000000000000
+NEAR_TRANSFER_AMOUNT=1
+
+# ETH → NEAR
+RECIPIENT=fusionswap.testnet
+ETH_TRANSFER_AMOUNT=0.001
+
+# Shared
+TIMELOCK_DURATION=3600
+LOG_LEVEL=info
+
+# --- Monitoring (enhanced-monitor-relayer.ts) ---
+POLL_INTERVAL=5000
+MAX_RECONNECT_ATTEMPTS=5
+HEALTH_CHECK_INTERVAL=30000
 ```
 
 ## Usage Examples
@@ -544,7 +573,7 @@ npx ts-node src/debug-order-137-transaction.ts --order-id=137
 ### Debug Mode
 Enable debug logging for detailed troubleshooting:
 ```bash
-SCRIPT_LOG_LEVEL=debug npx ts-node src/script-name.ts
+LOG_LEVEL=debug npx ts-node src/script-name.ts
 ```
 
 ### Error Analysis

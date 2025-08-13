@@ -94,7 +94,7 @@ describe('NearPartialFillService', () => {
     it('should throw an error if the contract call fails', async () => {
       // Arrange
       const error = new Error('Contract call failed');
-      mockNearAccount.functionCall.mockRejectedValueOnce(error);
+      mockNearAccount.functionCall.mockRejectedValue(error);
       
       // Act & Assert
       await expect(

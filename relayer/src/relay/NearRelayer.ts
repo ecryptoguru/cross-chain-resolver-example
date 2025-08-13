@@ -16,6 +16,7 @@ import { RelayerError, ErrorHandler } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { NearPartialFillService } from '../services/NearPartialFillService.js';
 import { EventEmitter } from 'events';
+import { withRetry } from '../utils/retry.js';
 
 export interface NearRelayerConfig {
   nearAccount: NearAccount;
@@ -30,6 +31,8 @@ export interface NearRelayerConfig {
   ethereumEscrowFactoryAddress: string;
   escrowContractId: string;
   pollIntervalMs?: number;
+  /** Optional explicit starting block for NearEventListener (inclusive) */
+  startBlock?: number;
   storageDir?: string;
 }
 
@@ -96,7 +99,7 @@ export class NearRelayer implements IMessageProcessor {
       config.nearAccount.connection.provider,
       config.escrowContractId,
       eventHandlers,
-      config.pollIntervalMs
+      { pollIntervalMs: config.pollIntervalMs, startBlock: config.startBlock }
     );
   }
 
@@ -430,6 +433,17 @@ export class NearRelayer implements IMessageProcessor {
       // Complete the swap order
       await this.contractService.completeSwapOrder(orderId, normalizedSecret);
 
+      // Also execute the corresponding Ethereum withdrawal if an escrow exists
+      const escrowAddress = await this.findEthereumEscrowBySecretHash(secretHash);
+      if (escrowAddress) {
+        await this.executeEthereumWithdrawal(escrowAddress, normalizedSecret, message.amount);
+      } else {
+        logger.warn('No Ethereum escrow found for secret hash during withdrawal processing', {
+          messageId: message.messageId,
+          secretHash
+        });
+      }
+
       logger.info('Withdrawal message processed successfully', {
         messageId: message.messageId,
         orderId
@@ -681,16 +695,16 @@ export class NearRelayer implements IMessageProcessor {
       logger.debug('Extracting secret from transaction logs', { orderId });
       
       // Get recent blocks and search for transactions related to this order
-      const currentBlock = await (this.config.nearAccount.connection.provider as any).block({ finality: 'final' });
-      const currentHeight = currentBlock.header?.height || 0;
+      const currentBlock = await withRetry(() => (this.config.nearAccount.connection.provider as any).block({ finality: 'final' })) as { header?: { height?: number } };
+      const currentHeight = (currentBlock.header?.height ?? 0) as number;
       const startBlock = Math.max(0, currentHeight - 100); // Search last 100 blocks
       
       for (let blockHeight = currentHeight; blockHeight >= startBlock; blockHeight--) {
         try {
-          const block = await this.config.nearAccount.connection.provider.block({ blockId: blockHeight.toString() }) as any;
+          const block = await withRetry(() => this.config.nearAccount.connection.provider.block({ blockId: blockHeight.toString() }) as any) as any;
           
           for (const chunk of block.chunks) {
-            const chunkDetails = await this.config.nearAccount.connection.provider.chunk(chunk.chunk_hash);
+            const chunkDetails = await withRetry(() => this.config.nearAccount.connection.provider.chunk(chunk.chunk_hash));
             
             for (const transaction of chunkDetails.transactions) {
               // Check if transaction is related to our escrow contract and order
@@ -742,7 +756,7 @@ export class NearRelayer implements IMessageProcessor {
   private async parseTransactionForSecret(txHash: string, orderId: string): Promise<string | null> {
     try {
       // Get transaction status and parse for secret
-      const txStatus = await this.config.nearAccount.connection.provider.txStatus(txHash, this.config.nearAccount.accountId);
+      const txStatus = await withRetry(() => this.config.nearAccount.connection.provider.txStatus(txHash, this.config.nearAccount.accountId));
       
       // Look through transaction receipts for function calls that might contain the secret
       for (const receipt of txStatus.receipts_outcome) {
@@ -786,7 +800,7 @@ export class NearRelayer implements IMessageProcessor {
       this.validator.validateTransactionHash(txHash, 'NEAR');
       this.validator.validateNearAccountId(signerId);
 
-      const txStatus = await this.config.nearAccount.connection.provider.txStatus(txHash, signerId);
+      const txStatus = await withRetry(() => this.config.nearAccount.connection.provider.txStatus(txHash, signerId));
       
       // Check if transaction was successful
       if (!txStatus.receipts_outcome) {

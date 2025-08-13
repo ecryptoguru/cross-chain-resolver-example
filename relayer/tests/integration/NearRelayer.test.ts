@@ -4,10 +4,62 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import fs from 'fs';
+import path from 'path';
 import { NearRelayer } from '../../src/relay/NearRelayer';
+import { ethers } from 'ethers';
 import { MockProvider, MockSigner } from '../mocks/ethers-mock-enhanced';
 import { MockNearAccount, MockNearProvider, MockNearConnection } from '../mocks/near-api-mock';
 import { MessageType, CrossChainMessage } from '../../src/types/interfaces';
+
+// Module-level mock: replace EthereumContractService before NearRelayer is evaluated (hoisted by Jest)
+jest.mock('../../src/services/EthereumContractService.js', () => {
+  return {
+    EthereumContractService: (jest.fn().mockImplementation(function(...args: any[]) {
+      const provider = args[0];
+      const signer = args[1];
+      const getMockEscrow = () => (provider && provider._mockEscrow) ? provider._mockEscrow : null;
+      const getMockReceipt = (fallbackHash?: string) => {
+        const r = provider && provider._mockTransactionReceipt ? provider._mockTransactionReceipt : null;
+        if (r) return r;
+        return {
+          status: 1,
+          transactionHash: fallbackHash || ('0x' + '1'.repeat(64)),
+          blockNumber: 0,
+          gasUsed: { toString: () => '21000' }
+        };
+      };
+      return {
+        // Used when creating escrows from NEAR orders
+        getSignerAddress: jest.fn(async () => {
+          return signer && typeof signer.getAddress === 'function' ? signer.getAddress() : '0x' + '0'.repeat(40);
+        }),
+        executeFactoryTransaction: jest.fn(async (_method: string, params: any[], value?: any) => {
+          // Simulate a contract write by sending a tx from the injected signer
+          if (signer && typeof signer.sendTransaction === 'function') {
+            const to = params && params[0] && params[0].taker ? params[0].taker : '0x' + '0'.repeat(40);
+            return signer.sendTransaction({ to, value });
+          }
+          // Fallback minimal tx response
+          return {
+            hash: '0x' + '1'.repeat(64),
+            wait: async () => getMockReceipt('0x' + '1'.repeat(64))
+          } as any;
+        }),
+        // Lookup helpers used in withdrawal path
+        findEscrowBySecretHash: jest.fn(async (_secretHash: string) => getMockEscrow()),
+        getEscrowDetails: jest.fn(async (_escrowAddress: string) => getMockEscrow()),
+        // Withdrawal path should surface provider-configured receipt for deterministic txHash in tests
+        executeWithdrawal: jest.fn(async (escrowAddress: string, secret: string) => {
+          if (signer && typeof signer.sendTransaction === 'function') {
+            await signer.sendTransaction({ to: escrowAddress, data: secret });
+          }
+          return getMockReceipt();
+        })
+      };
+    })) as any
+  };
+});
 
 // Define test context type
 /** @typedef {Object} TestContext
@@ -21,6 +73,7 @@ import { MessageType, CrossChainMessage } from '../../src/types/interfaces';
 
 // Setup test environment
 let lastRelayer: NearRelayer | null = null;
+let lastStorageDir: string | null = null;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -35,6 +88,18 @@ afterEach(async () => {
     }
   } finally {
     jest.useRealTimers();
+  }
+  // Cleanup temp storage dir if created
+  if (lastStorageDir) {
+    try {
+      if (fs.existsSync(lastStorageDir)) {
+        fs.rmSync(lastStorageDir, { recursive: true, force: true });
+      }
+    } catch (_) {
+      // ignore cleanup errors in tests
+    } finally {
+      lastStorageDir = null;
+    }
   }
 });
 
@@ -54,12 +119,16 @@ function setupTest() {
   // Set up NEAR account connection
   mockNearAccount.connection = {
     provider: mockNearProvider,
-    signer: { signMessage: jest.fn() } as any
-  };
+    signer: undefined
+  } as any;
+
+  // Create a unique storage directory inside project cwd to satisfy StorageService path validation
+  const tempPrefix = path.join(process.cwd(), 'near-relayer-test-');
+  const tmpStorageDir = fs.mkdtempSync(tempPrefix);
 
   // Configure relayer
   const config = {
-    nearAccount: mockNearAccount,
+    nearAccount: mockNearAccount as any,
     ethereum: {
       rpcUrl: 'http://localhost:8545',
       privateKey: '0x' + '11'.repeat(32),
@@ -69,14 +138,16 @@ function setupTest() {
     },
     ethereumEscrowFactoryAddress: '0x1234567890123456789012345678901234567890',
     escrowContractId: 'escrow.test.near',
+    startBlock: 1000,
     pollIntervalMs: 10,
-    storageDir: './test-storage'
+    storageDir: tmpStorageDir
   };
 
   // Initialize relayer with config
   const relayer = new NearRelayer(config as any);
   // Track for universal teardown
   lastRelayer = relayer as any;
+  lastStorageDir = config.storageDir;
 
   return {
     relayer,
@@ -219,7 +290,7 @@ describe('NearRelayer', () => {
         initiator: 'test.near',
         recipient: '0x1234567890123456789012345678901234567890',
         amount: '1000000000000000000',
-        secretHash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        secretHash: ethers.utils.keccak256('0x' + '12'.repeat(32)),
         timelock: Math.floor(Date.now() / 1000) + 86400,
         status: 'active',
       });
@@ -242,6 +313,17 @@ describe('NearRelayer', () => {
       const blockHeight = 1002;
       const chunkHash = `chunk-hash-${blockHeight}`;
       const txHash = 'abcdEFGH1234567890abcdEFGH1234567890abc1';
+
+      // NEAR find_escrow_by_secret_hash should return an active order for the revealed secret
+      mockNearProvider.setMockCallFunctionResult('find_escrow_by_secret_hash', {
+        id: 'test-order-1',
+        initiator: 'sender.near',
+        recipient: '0x1234567890123456789012345678901234567890',
+        amount: '1000000000000000000',
+        secret_hash: ethers.utils.keccak256('0x' + '12'.repeat(32)),
+        timelock: Math.floor(Date.now() / 1000) + 86400,
+        status: 'active'
+      });
 
       mockNearProvider.setMockChunk(chunkHash, {
         transactions: [
@@ -378,7 +460,7 @@ describe('NearRelayer', () => {
         initiator: 'test.near',
         recipient: '0x1234567890123456789012345678901234567890',
         amount: '1000000000000000000',
-        secretHash: '0x' + '12'.repeat(32),
+        secretHash: ethers.utils.keccak256('0x' + '12'.repeat(32)),
         timelock: Math.floor(Date.now() / 1000) + 86400,
         status: 'active'
       });
@@ -387,6 +469,17 @@ describe('NearRelayer', () => {
       const completedBlock = 1002;
       const completedChunkHash = `chunk-hash-${completedBlock}`;
       const completedTxHash = 'abcdEFGH1234567890abcdEFGH1234567890abc3';
+
+      // NEAR find_escrow_by_secret_hash mock for full flow completion
+      mockNearProvider.setMockCallFunctionResult('find_escrow_by_secret_hash', {
+        id: 'integration-order-123',
+        initiator: 'test.near',
+        recipient: '0x1234567890123456789012345678901234567890',
+        amount: '1000000000000000000',
+        secret_hash: ethers.utils.keccak256('0x' + '12'.repeat(32)),
+        timelock: Math.floor(Date.now() / 1000) + 86400,
+        status: 'active'
+      });
 
       mockNearProvider.setMockChunk(completedChunkHash, {
         transactions: [
@@ -531,10 +624,11 @@ describe('NearRelayer', () => {
         timestamp: Date.now()
       };
       
-      mockNearAccount.setMockFunctionCallResult({ success: true });
+      mockNearAccount.setMockFunctionCallResult({ status: { SuccessValue: '' } });
+      const fnSpy = jest.spyOn(mockNearAccount as any, 'functionCall');
       await relayer.processMessage(depositMessage);
       
-      expect(mockNearAccount.functionCall).toHaveBeenCalledWith(
+      expect(fnSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           methodName: 'create_swap_order',
           args: expect.objectContaining({
@@ -546,7 +640,7 @@ describe('NearRelayer', () => {
     });
 
     test('should process withdrawal message successfully', async () => {
-      const { relayer, mockEthereumProvider, mockNearProvider, mockEthereumSigner } = setupTest();
+      const { relayer, mockNearProvider, mockEthereumSigner, mockEthereumProvider } = setupTest();
       await relayer.start();
       
       const message: CrossChainMessage = {
@@ -575,16 +669,19 @@ describe('NearRelayer', () => {
         timelock: Math.floor(Date.now() / 1000) + 86400,
         status: 'active'
       });
-      
+
+      // Ensure Ethereum escrow lookup succeeds during withdrawal path
       mockEthereumProvider.setMockEscrow({
         escrowAddress: '0x9876543210987654321098765432109876543210',
         initiator: 'test.near',
         recipient: '0x1234567890123456789012345678901234567890',
         amount: '1000000000000000000',
-        secretHash: '0x' + '12'.repeat(32),
+        secretHash: ethers.utils.keccak256('0x' + '12'.repeat(32)),
         timelock: Math.floor(Date.now() / 1000) + 86400,
         status: 'active'
       });
+
+      // Use module-level mock for EthereumContractService; no mid-test spies needed
       
       const sendSpy = jest.spyOn(mockEthereumSigner as any, 'sendTransaction');
       await relayer.processMessage(message);

@@ -91,8 +91,9 @@ cd relayer && npm install && cd ..
 cd scripts && npm install && cd ..
 
 # 3. Configure Environment
-cp .env.example .env
-# Edit .env with your configuration:
+cp relayer/.env.example relayer/.env
+cp scripts/.env.example scripts/.env
+# Edit relayer/.env and scripts/.env with your configuration:
 # - NEAR account credentials
 # - Ethereum RPC URLs and private keys
 # - Contract addresses
@@ -217,9 +218,10 @@ npx tsx src/deploy-escrow.ts
 ### **Production Deployment**
 
 ```bash
-# Configure production environment
-cp .env.production .env
-# Edit .env with production settings
+# Configure production environment (per package)
+cp relayer/.env.example relayer/.env
+cp scripts/.env.example scripts/.env
+# Edit relayer/.env and scripts/.env with production settings
 
 # Deploy with production configuration
 npm run deploy:production

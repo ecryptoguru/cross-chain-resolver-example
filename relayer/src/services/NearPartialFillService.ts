@@ -4,6 +4,7 @@ import { InMemoryKeyStore } from '@near-js/keystores';
 import { KeyPair } from '@near-js/crypto';
 import { logger } from '../utils/logger.js';
 import { PartialFillParams, OrderState } from '../types/interfaces.js';
+import { withRetry } from '../utils/retry.js';
 import { ethers } from 'ethers';
 
 export class NearPartialFillService {
@@ -25,7 +26,7 @@ export class NearPartialFillService {
       logger.info(`Processing partial fill for order ${params.orderId}`, { params });
       
       // Call the NEAR contract to process the partial fill
-      const result = await this.nearAccount.functionCall({
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.contractId,
         methodName: 'process_partial_fill',
         args: {
@@ -38,7 +39,7 @@ export class NearPartialFillService {
         },
         gas: BigInt('300000000000000'), // 300 TGas
         attachedDeposit: BigInt(0),
-      });
+      }));
       
       logger.info(`Partial fill processed for order ${params.orderId}`, { result });
       return true;
@@ -55,7 +56,7 @@ export class NearPartialFillService {
     try {
       logger.info(`Splitting order ${orderId} into ${amounts.length} parts`);
       
-      const result = await this.nearAccount.functionCall({
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.contractId,
         methodName: 'split_order',
         args: {
@@ -64,7 +65,7 @@ export class NearPartialFillService {
         },
         gas: BigInt('300000000000000'), // 300 TGas
         attachedDeposit: BigInt(0),
-      });
+      }));
       
       logger.info(`Order ${orderId} split successfully`, { result });
       // Type cast the result to the expected structure
@@ -83,7 +84,7 @@ export class NearPartialFillService {
     try {
       logger.info(`Processing refund for order ${orderId} to ${recipient}`);
       
-      const result = await this.nearAccount.functionCall({
+      const result = await withRetry(() => this.nearAccount.functionCall({
         contractId: this.contractId,
         methodName: 'process_refund',
         args: {
@@ -92,7 +93,7 @@ export class NearPartialFillService {
         },
         gas: BigInt('200000000000000'), // 200 TGas
         attachedDeposit: BigInt(0),
-      });
+      }));
       
       logger.info(`Refund processed for order ${orderId}`, { result });
       return true;
@@ -107,11 +108,11 @@ export class NearPartialFillService {
    */
   async getOrderState(orderId: string): Promise<OrderState> {
     try {
-      const result = await this.provider.callFunction(
+      const result = await withRetry(() => this.provider.callFunction(
         this.contractId,
         'get_order_state',
         { order_id: orderId }
-      );
+      ));
       
       if (!result) {
         throw new Error(`Failed to get order state for ${orderId}`);

@@ -8,6 +8,7 @@ import { IContractService, EthereumEscrowDetails } from '../types/interfaces.js'
 import { ContractError, ValidationError, ErrorHandler } from '../utils/errors.js';
 import { ValidationService } from './ValidationService.js';
 import { logger } from '../utils/logger.js';
+import { withRetry } from '../utils/retry.js';
 
 // Escrow contract ABI
 const EscrowABI = [
@@ -80,7 +81,7 @@ export class EthereumContractService implements IContractService {
    */
   async getSignerAddress(): Promise<string> {
     try {
-      return await this.signer.getAddress();
+      return await withRetry(() => this.signer.getAddress());
     } catch (error) {
       throw new ContractError(
         'Failed to get signer address',
@@ -129,7 +130,9 @@ export class EthereumContractService implements IContractService {
       });
 
       // Execute the transaction
-      const tx = await factoryWithSigner[method](...params, txOptions);
+      const tx = await withRetry<ethers.ContractTransaction>(
+        () => factoryWithSigner[method](...params, txOptions)
+      );
       
       logger.info('Factory transaction executed successfully', {
         factoryAddress: this.factoryContract.address,
@@ -175,7 +178,7 @@ export class EthereumContractService implements IContractService {
       const contract = new ethers.Contract(contractAddress, EscrowABI, this.signer);
       
       // Execute the transaction
-      const tx = await contract[method](...params);
+      const tx = await withRetry<ethers.ContractTransaction>(() => contract[method](...params));
       
       logger.info('Transaction executed successfully', {
         contractAddress,
@@ -206,7 +209,16 @@ export class EthereumContractService implements IContractService {
       this.validator.validateEthereumAddress(escrowAddress);
 
       const escrowContract = new ethers.Contract(escrowAddress, EscrowABI, this.provider);
-      const details = await escrowContract.getDetails();
+      const details = await withRetry<{
+        status: number;
+        token: string;
+        amount: ethers.BigNumber;
+        timelock: ethers.BigNumber;
+        secretHash: string;
+        initiator: string;
+        recipient: string;
+        chainId: ethers.BigNumber;
+      }>(() => escrowContract.getDetails());
 
       const escrowDetails: EthereumEscrowDetails = {
         status: details.status,
@@ -253,12 +265,12 @@ export class EthereumContractService implements IContractService {
         maxBlocksToSearch
       });
 
-      const currentBlock = await this.provider.getBlockNumber();
+      const currentBlock = await withRetry<number>(() => this.provider.getBlockNumber());
       const fromBlock = Math.max(0, currentBlock - maxBlocksToSearch);
 
       // Query all EscrowCreated events
-      const filter = this.factoryContract.filters.EscrowCreated();
-      const events = await this.factoryContract.queryFilter(filter, fromBlock);
+      const filter = this.factoryContract.filters.DstEscrowCreated();
+      const events = await withRetry<ethers.Event[]>(() => this.factoryContract.queryFilter(filter, fromBlock));
       
       logger.debug(`Found ${events.length} EscrowCreated events to check for secret hash`);
 
@@ -321,7 +333,7 @@ export class EthereumContractService implements IContractService {
       const maxEscrowsToCheck = params.maxEscrowsToCheck || 100;
 
       // Get current block number and calculate search range
-      const currentBlock = await this.provider.getBlockNumber();
+      const currentBlock = await withRetry<number>(() => this.provider.getBlockNumber());
       const fromBlock = Math.max(0, currentBlock - maxBlocksToSearch);
 
       logger.debug('Searching for escrow', {
@@ -330,12 +342,9 @@ export class EthereumContractService implements IContractService {
         maxEscrowsToCheck
       });
 
-      // Query EscrowCreated events
-      const filter = params.initiator 
-        ? this.factoryContract.filters.EscrowCreated(null, params.initiator)
-        : this.factoryContract.filters.EscrowCreated();
-        
-      const events = await this.factoryContract.queryFilter(filter, fromBlock, currentBlock);
+      // Query DstEscrowCreated events (filtering by initiator is done after fetching details)
+      const filter = this.factoryContract.filters.DstEscrowCreated();
+      const events = await withRetry<ethers.Event[]>(() => this.factoryContract.queryFilter(filter, fromBlock, currentBlock));
 
       // Sort events by block number (newest first)
       const sortedEvents = events.sort((a, b) => b.blockNumber - a.blockNumber);
@@ -424,13 +433,13 @@ export class EthereumContractService implements IContractService {
       // Estimate gas with buffer
       let gasLimit: ethers.BigNumber;
       try {
-        const gasEstimate = await escrowContract.estimateGas.withdraw(secret);
+        const gasEstimate = await withRetry<ethers.BigNumber>(() => escrowContract.estimateGas.withdraw(secret));
         gasLimit = gasEstimate.mul(130).div(100); // 30% buffer
       } catch {
         gasLimit = ethers.BigNumber.from('300000'); // Fallback gas limit
       }
 
-      const tx = await escrowContract.withdraw(secret, { gasLimit });
+      const tx = await withRetry<ethers.ContractTransaction>(() => escrowContract.withdraw(secret, { gasLimit }));
       
       logger.info('Withdrawal transaction sent', {
         escrowAddress,
@@ -438,7 +447,7 @@ export class EthereumContractService implements IContractService {
         gasLimit: gasLimit.toString()
       });
 
-      const receipt = await tx.wait();
+      const receipt = await withRetry<ethers.ContractReceipt>(() => tx.wait());
       
       if (receipt.status !== 1) {
         throw new ContractError(
@@ -507,14 +516,14 @@ export class EthereumContractService implements IContractService {
       // Execute refund
       const escrowContract = new ethers.Contract(escrowAddress, EscrowABI, this.signer);
       
-      const tx = await escrowContract.refund();
+      const tx = await withRetry<ethers.ContractTransaction>(() => escrowContract.refund());
       
       logger.info('Refund transaction sent', {
         escrowAddress,
         txHash: tx.hash
       });
 
-      const receipt = await tx.wait();
+      const receipt = await withRetry<ethers.ContractReceipt>(() => tx.wait());
       
       if (receipt.status !== 1) {
         throw new ContractError(
